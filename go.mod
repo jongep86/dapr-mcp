@@ -3,10 +3,10 @@ module github.com/dapr/dapr-mcp-server
 go 1.25.4
 
 require (
-	github.com/coreos/go-oidc/v3 v3.17.0
+	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/dapr/dapr v1.16.0
 	github.com/dapr/go-sdk v1.13.0
-	github.com/go-jose/go-jose/v4 v4.1.3
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.2.0
 	github.com/spiffe/go-spiffe/v2 v2.6.0
@@ -42,7 +42,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
-	golang.org/x/oauth2 v0.32.0 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251202230838-ff82c1b0f217 // indirect
