@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	dtworkflow "github.com/dapr/durabletask-go/workflow"
 	dapr "github.com/dapr/go-sdk/client"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel"
@@ -28,6 +29,7 @@ import (
 	secret "github.com/dapr/dapr-mcp-server/pkg/secrets"
 	state "github.com/dapr/dapr-mcp-server/pkg/state"
 	"github.com/dapr/dapr-mcp-server/pkg/telemetry"
+	workflow "github.com/dapr/dapr-mcp-server/pkg/workflow"
 )
 
 var (
@@ -145,6 +147,10 @@ func main() {
 	metadata.RegisterTools(server, DaprClient)
 	invoke.RegisterTools(server, DaprClient)
 	actor.RegisterTools(server, DaprClient)
+
+	// Workflow management is part of the Dapr runtime (no component required);
+	// the workflow client reuses the existing sidecar gRPC connection.
+	workflow.RegisterTools(server, dtworkflow.NewClient(DaprClient.GrpcClientConn()))
 
 	// Discover components and register conditional tools
 	componentPresence := make(map[string]bool)

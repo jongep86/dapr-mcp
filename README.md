@@ -13,6 +13,7 @@ dapr-mcp bridges AI agents with Dapr's powerful microservices APIs, enabling:
 - **Bindings**: Interact with external systems (databases, queues, etc.)
 - **Conversation AI**: Delegate tasks to external LLMs via Dapr
 - **Cryptography**: Encrypt and decrypt sensitive data
+- **Workflow Management**: Start, inspect, pause/resume, terminate, and purge Dapr Workflows, and raise events to them
 
 ## Features
 
@@ -76,6 +77,13 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | state | get_state | Stable | State retrieval |
 | state | delete_state | Stable | State deletion |
 | state | execute_transaction | Stable | Atomic state operations |
+| workflow | start_workflow | Beta | Schedule a new workflow instance |
+| workflow | get_workflow_status | Beta | Workflow instance status/output |
+| workflow | pause_workflow | Beta | Suspend a running instance |
+| workflow | resume_workflow | Beta | Resume a suspended instance |
+| workflow | terminate_workflow | Beta | Forcefully end an instance |
+| workflow | raise_workflow_event | Beta | Deliver an external event |
+| workflow | purge_workflow | Beta | Delete state of a finished instance |
 
 ## Configuration
 
@@ -281,7 +289,7 @@ Add to your Claude Desktop configuration:
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.26+
 - Dapr CLI
 - Docker (optional, for local testing)
 
@@ -322,6 +330,7 @@ pkg/
   secrets/            # Secret management tools
   state/              # State management tools
   telemetry/          # OTEL instrumentation
+  workflow/           # Workflow management tools
 ```
 
 ## Contributing
