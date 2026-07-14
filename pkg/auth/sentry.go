@@ -374,7 +374,7 @@ func (a *DaprSentryAuthenticator) refreshJWKS(ctx context.Context) error {
 		"url", a.config.JWKSUrl,
 	)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.config.JWKSUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.config.JWKSUrl, nil) //nolint:gosec // G704: JWKS URL is operator-provided configuration, not user input
 	if err != nil {
 		a.logger.Debug("[SENTRY-AUTH] failed to create JWKS request",
 			"error", err,
@@ -382,7 +382,7 @@ func (a *DaprSentryAuthenticator) refreshJWKS(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.httpClient.Do(req) //nolint:gosec // G704: JWKS URL is operator-provided configuration, not user input
 	if err != nil {
 		a.logger.Debug("[SENTRY-AUTH] JWKS HTTP request failed",
 			"error", err,
