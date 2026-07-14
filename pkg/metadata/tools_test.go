@@ -126,6 +126,32 @@ func TestGetMetadataTool(t *testing.T) {
 	}
 }
 
+func TestGetMetadataToolTextContentIncludesComponentDetails(t *testing.T) {
+	// Many MCP clients (e.g. Claude Desktop via mcp-remote) only surface text
+	// content to the model; details that live solely in the structured result
+	// never reach it. The component names and types must therefore appear in
+	// the text content itself.
+	mockClient := new(mocks.MockDaprClient)
+	mockClient.On("GetMetadata", mock.Anything).Return(&dapr.GetMetadataResponse{
+		RegisteredComponents: []*dapr.MetadataRegisteredComponents{
+			{Name: "statestore-redis", Type: "state.redis", Version: "v1", Capabilities: []string{"ETAG"}},
+			{Name: "pubsub-redis", Type: "pubsub.redis", Version: "v1"},
+		},
+	}, nil)
+	metadataClient = mockClient
+
+	result, _, err := getMetadataTool(context.Background(), &mcp.CallToolRequest{}, nil)
+
+	assert.NoError(t, err)
+	assert.False(t, result.IsError)
+	textContent, ok := result.Content[0].(*mcp.TextContent)
+	assert.True(t, ok)
+	assert.Contains(t, textContent.Text, "statestore-redis")
+	assert.Contains(t, textContent.Text, "state.redis")
+	assert.Contains(t, textContent.Text, "pubsub-redis")
+	assert.Contains(t, textContent.Text, "ETAG")
+}
+
 func TestGetLiveComponentList(t *testing.T) {
 	tests := []struct {
 		name          string
