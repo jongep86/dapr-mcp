@@ -39,6 +39,19 @@ func (m *mockWorkflowClient) ListInstanceIDs(ctx context.Context, opts ...wf.Lis
 	return args.Get(0).(*wf.ListInstanceIDsResponse), args.Error(1)
 }
 
+func (m *mockWorkflowClient) GetInstanceHistory(ctx context.Context, id string, opts ...wf.GetInstanceHistoryOptions) (*wf.GetInstanceHistoryResponse, error) {
+	args := m.Called(ctx, id, opts)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*wf.GetInstanceHistoryResponse), args.Error(1)
+}
+
+func (m *mockWorkflowClient) RerunWorkflowFromEvent(ctx context.Context, id string, eventID uint32, opts ...wf.RerunOptions) (string, error) {
+	args := m.Called(ctx, id, eventID, opts)
+	return args.String(0), args.Error(1)
+}
+
 func (m *mockWorkflowClient) SuspendWorkflow(ctx context.Context, id, reason string) error {
 	args := m.Called(ctx, id, reason)
 	return args.Error(0)
@@ -582,6 +595,222 @@ func TestListWorkflowsToolStructuredResult(t *testing.T) {
 	statusCounts, ok := structuredMap["counts_by_status"].(map[string]int)
 	assert.True(t, ok)
 	assert.Equal(t, 2, statusCounts["RUNNING"])
+}
+
+func TestStartWorkflowToolWithStartTime(t *testing.T) {
+	t.Run("valid start time schedules workflow", func(t *testing.T) {
+		mockClient := new(mockWorkflowClient)
+		mockClient.On("ScheduleWorkflow", mock.Anything, "nightly_report", mock.MatchedBy(func(opts []wf.NewWorkflowOptions) bool {
+			return len(opts) == 1
+		})).Return("report-1", nil)
+		workflowClient = mockClient
+
+		result, structured, err := startWorkflowTool(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{
+			WorkflowName: "nightly_report",
+			StartTime:    "2026-07-15T06:00:00Z",
+		})
+
+		assert.NoError(t, err)
+		assert.False(t, result.IsError)
+		assertTextContains(t, result, "to start at 2026-07-15T06:00:00Z")
+
+		structuredMap, ok := structured.(map[string]any)
+		assert.True(t, ok)
+		assert.Equal(t, "2026-07-15T06:00:00Z", structuredMap["start_time"])
+		mockClient.AssertExpectations(t)
+	})
+
+	t.Run("invalid start time is rejected without calling Dapr", func(t *testing.T) {
+		mockClient := new(mockWorkflowClient)
+		workflowClient = mockClient
+
+		result, _, err := startWorkflowTool(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{
+			WorkflowName: "nightly_report",
+			StartTime:    "tomorrow at 6",
+		})
+
+		assert.NoError(t, err)
+		assert.True(t, result.IsError)
+		assertTextContains(t, result, "invalid startTime")
+		mockClient.AssertNotCalled(t, "ScheduleWorkflow")
+	})
+}
+
+func TestGetWorkflowHistoryTool(t *testing.T) {
+	history := &wf.GetInstanceHistoryResponse{
+		Events: []*protos.HistoryEvent{
+			{
+				EventId: 0,
+				EventType: &protos.HistoryEvent_ExecutionStarted{
+					ExecutionStarted: &protos.ExecutionStartedEvent{Name: "order_processing"},
+				},
+			},
+			{
+				EventId: 1,
+				EventType: &protos.HistoryEvent_TaskScheduled{
+					TaskScheduled: &protos.TaskScheduledEvent{Name: "charge_payment"},
+				},
+			},
+			{
+				EventId: 2,
+				EventType: &protos.HistoryEvent_TaskFailed{
+					TaskFailed: &protos.TaskFailedEvent{
+						FailureDetails: &protos.TaskFailureDetails{
+							ErrorType:    "ApplicationError",
+							ErrorMessage: "payment declined",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		args        GetWorkflowHistoryArgs
+		setupMock   func(*mockWorkflowClient)
+		wantErr     bool
+		wantContent string
+	}{
+		{
+			name: "history with started, scheduled, and failed events",
+			args: GetWorkflowHistoryArgs{InstanceID: "order-42"},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("GetInstanceHistory", mock.Anything, "order-42", mock.Anything).
+					Return(history, nil)
+			},
+			wantErr:     false,
+			wantContent: "error: payment declined",
+		},
+		{
+			name: "history lists activity names",
+			args: GetWorkflowHistoryArgs{InstanceID: "order-42"},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("GetInstanceHistory", mock.Anything, "order-42", mock.Anything).
+					Return(history, nil)
+			},
+			wantErr:     false,
+			wantContent: "activity: charge_payment",
+		},
+		{
+			name: "history API error",
+			args: GetWorkflowHistoryArgs{InstanceID: "unknown"},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("GetInstanceHistory", mock.Anything, "unknown", mock.Anything).
+					Return(nil, errors.New("instance not found"))
+			},
+			wantErr:     true,
+			wantContent: "failed to fetch history of workflow instance 'unknown'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(mockWorkflowClient)
+			tt.setupMock(mockClient)
+			workflowClient = mockClient
+
+			result, _, err := getWorkflowHistoryTool(context.Background(), &mcp.CallToolRequest{}, tt.args)
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantErr, result.IsError)
+			assertTextContains(t, result, tt.wantContent)
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
+func TestGetWorkflowHistoryToolStructuredResult(t *testing.T) {
+	mockClient := new(mockWorkflowClient)
+	mockClient.On("GetInstanceHistory", mock.Anything, "order-42", mock.Anything).
+		Return(&wf.GetInstanceHistoryResponse{
+			Events: []*protos.HistoryEvent{
+				{
+					EventId: 1,
+					EventType: &protos.HistoryEvent_TaskScheduled{
+						TaskScheduled: &protos.TaskScheduledEvent{Name: "charge_payment"},
+					},
+				},
+			},
+		}, nil)
+	workflowClient = mockClient
+
+	_, structured, err := getWorkflowHistoryTool(context.Background(), &mcp.CallToolRequest{}, GetWorkflowHistoryArgs{InstanceID: "order-42"})
+
+	assert.NoError(t, err)
+	structuredMap, ok := structured.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, 1, structuredMap["count"])
+
+	events, ok := structuredMap["events"].([]map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "taskScheduled", events[0]["type"])
+	assert.Equal(t, "activity: charge_payment", events[0]["detail"])
+}
+
+func TestRerunWorkflowTool(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        RerunWorkflowArgs
+		setupMock   func(*mockWorkflowClient)
+		wantErr     bool
+		wantContent string
+	}{
+		{
+			name: "successful rerun",
+			args: RerunWorkflowArgs{InstanceID: "order-42", EventID: 1},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("RerunWorkflowFromEvent", mock.Anything, "order-42", uint32(1), mock.MatchedBy(func(opts []wf.RerunOptions) bool {
+					return len(opts) == 0
+				})).Return("order-42-rerun", nil)
+			},
+			wantErr:     false,
+			wantContent: "Successfully started rerun of workflow instance 'order-42' from event 1 as new instance 'order-42-rerun'",
+		},
+		{
+			name: "rerun with new instance ID and replacement input",
+			args: RerunWorkflowArgs{InstanceID: "order-42", EventID: 1, NewInstanceID: "order-42-v2", Input: `{"retry":true}`},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("RerunWorkflowFromEvent", mock.Anything, "order-42", uint32(1), mock.MatchedBy(func(opts []wf.RerunOptions) bool {
+					return len(opts) == 2
+				})).Return("order-42-v2", nil)
+			},
+			wantErr:     false,
+			wantContent: "as new instance 'order-42-v2'",
+		},
+		{
+			name:        "negative event ID is rejected without calling Dapr",
+			args:        RerunWorkflowArgs{InstanceID: "order-42", EventID: -1},
+			setupMock:   func(m *mockWorkflowClient) {},
+			wantErr:     true,
+			wantContent: "invalid eventID -1",
+		},
+		{
+			name: "rerun API error",
+			args: RerunWorkflowArgs{InstanceID: "unknown", EventID: 1},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("RerunWorkflowFromEvent", mock.Anything, "unknown", uint32(1), mock.Anything).
+					Return("", errors.New("instance not found"))
+			},
+			wantErr:     true,
+			wantContent: "failed to rerun workflow instance 'unknown' from event 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(mockWorkflowClient)
+			tt.setupMock(mockClient)
+			workflowClient = mockClient
+
+			result, _, err := rerunWorkflowTool(context.Background(), &mcp.CallToolRequest{}, tt.args)
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantErr, result.IsError)
+			assertTextContains(t, result, tt.wantContent)
+			mockClient.AssertExpectations(t)
+		})
+	}
 }
 
 func TestRegisterTools(t *testing.T) {

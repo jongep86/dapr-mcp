@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/dapr/durabletask-go/api"
 	"github.com/dapr/durabletask-go/api/protos"
@@ -23,6 +25,8 @@ type WorkflowClient interface {
 	ScheduleWorkflow(ctx context.Context, workflow string, opts ...wf.NewWorkflowOptions) (string, error)
 	FetchWorkflowMetadata(ctx context.Context, id string, opts ...wf.FetchWorkflowMetadataOptions) (*wf.WorkflowMetadata, error)
 	ListInstanceIDs(ctx context.Context, opts ...wf.ListInstanceIDsOptions) (*wf.ListInstanceIDsResponse, error)
+	GetInstanceHistory(ctx context.Context, id string, opts ...wf.GetInstanceHistoryOptions) (*wf.GetInstanceHistoryResponse, error)
+	RerunWorkflowFromEvent(ctx context.Context, id string, eventID uint32, opts ...wf.RerunOptions) (string, error)
 	SuspendWorkflow(ctx context.Context, id, reason string) error
 	ResumeWorkflow(ctx context.Context, id, reason string) error
 	TerminateWorkflow(ctx context.Context, id string, opts ...wf.TerminateOptions) error
@@ -34,6 +38,7 @@ type StartWorkflowArgs struct {
 	WorkflowName string `json:"workflowName" jsonschema:"The name of the workflow to start, as registered by the workflow application (e.g., 'order_processing_workflow')."`
 	InstanceID   string `json:"instanceID,omitempty" jsonschema:"Optional unique instance ID for the new workflow. If omitted, Dapr generates one."`
 	Input        string `json:"input,omitempty" jsonschema:"Optional input for the workflow, typically a JSON string."`
+	StartTime    string `json:"startTime,omitempty" jsonschema:"Optional scheduled start time in RFC 3339 format (e.g., '2026-07-15T06:00:00Z'). If omitted, the workflow starts immediately."`
 }
 
 type GetWorkflowStatusArgs struct {
@@ -64,6 +69,17 @@ type PurgeWorkflowArgs struct {
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the completed, failed, or terminated workflow whose state should be purged."`
 }
 
+type GetWorkflowHistoryArgs struct {
+	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow whose event history should be retrieved."`
+}
+
+type RerunWorkflowArgs struct {
+	InstanceID    string `json:"instanceID" jsonschema:"The instance ID of the (typically failed) workflow to rerun."`
+	EventID       int    `json:"eventID" jsonschema:"The eventId of the history event to rerun from. Use get_workflow_history to find it."`
+	NewInstanceID string `json:"newInstanceID,omitempty" jsonschema:"Optional instance ID for the rerun instance. If omitted, Dapr generates one."`
+	Input         string `json:"input,omitempty" jsonschema:"Optional replacement input for the rerun, typically a JSON string. If omitted, the original input is reused."`
+}
+
 type ListWorkflowsArgs struct {
 	Limit             int    `json:"limit,omitempty" jsonschema:"Maximum number of instances to return per call (default 100, max 500)."`
 	ContinuationToken string `json:"continuationToken,omitempty" jsonschema:"Optional continuation token from a previous list_workflows call to fetch the next page."`
@@ -91,8 +107,26 @@ func startWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Start
 	if args.Input != "" {
 		opts = append(opts, wf.NewWorkflowOptions(api.WithRawInput(wrapperspb.String(args.Input))))
 	}
+	if args.StartTime != "" {
+		startTime, err := time.Parse(time.RFC3339, args.StartTime)
+		if err != nil {
+			toolErrorMessage := fmt.Errorf("invalid startTime '%s': must be RFC 3339 (e.g., '2026-07-15T06:00:00Z'): %v", args.StartTime, err).Error()
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
+				IsError: true,
+			}, nil, nil
+		}
+		opts = append(opts, wf.NewWorkflowOptions(api.WithStartTime(startTime)))
+	}
 
 	id, err := workflowClient.ScheduleWorkflow(ctx, args.WorkflowName, opts...)
+	if err == nil && args.StartTime != "" {
+		successMessage := fmt.Sprintf("Successfully scheduled workflow '%s' with instance ID '%s' to start at %s.", args.WorkflowName, id, args.StartTime)
+		log.Println(successMessage)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: successMessage}},
+		}, map[string]any{"workflow_name": args.WorkflowName, "instance_id": id, "start_time": args.StartTime}, nil
+	}
 	if err != nil {
 		log.Printf("Dapr ScheduleWorkflow failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to start workflow '%s': %v", args.WorkflowName, err).Error()
@@ -299,6 +333,141 @@ func purgeWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Purge
 	}, map[string]any{"instance_id": args.InstanceID, "purged": true}, nil
 }
 
+// historyEventSummary returns the oneof event type name (e.g. taskScheduled)
+// and a short human-readable detail for the most relevant event types.
+func historyEventSummary(ev *protos.HistoryEvent) (string, string) {
+	eventType := "unknown"
+	m := ev.ProtoReflect()
+	if od := m.Descriptor().Oneofs().ByName("eventType"); od != nil {
+		if fd := m.WhichOneof(od); fd != nil {
+			eventType = string(fd.Name())
+		}
+	}
+
+	var detail string
+	switch {
+	case ev.GetExecutionStarted() != nil:
+		detail = fmt.Sprintf("workflow: %s", ev.GetExecutionStarted().GetName())
+	case ev.GetExecutionCompleted() != nil:
+		detail = strings.TrimPrefix(ev.GetExecutionCompleted().GetWorkflowStatus().String(), "ORCHESTRATION_STATUS_")
+		if failure := ev.GetExecutionCompleted().GetFailureDetails(); failure != nil {
+			detail = fmt.Sprintf("%s: %s", detail, failure.GetErrorMessage())
+		}
+	case ev.GetTaskScheduled() != nil:
+		detail = fmt.Sprintf("activity: %s", ev.GetTaskScheduled().GetName())
+	case ev.GetTaskFailed() != nil:
+		detail = fmt.Sprintf("error: %s", ev.GetTaskFailed().GetFailureDetails().GetErrorMessage())
+	case ev.GetEventRaised() != nil:
+		detail = fmt.Sprintf("event: %s", ev.GetEventRaised().GetName())
+	case ev.GetTimerCreated() != nil:
+		if fireAt := ev.GetTimerCreated().GetFireAt(); fireAt != nil {
+			detail = fmt.Sprintf("fires at: %s", fireAt.AsTime().String())
+		}
+	}
+	return eventType, detail
+}
+
+func getWorkflowHistoryTool(ctx context.Context, req *mcp.CallToolRequest, args GetWorkflowHistoryArgs) (*mcp.CallToolResult, any, error) {
+	ctx, span := otel.Tracer("dapr-mcp-server").Start(ctx, "get_workflow_history")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("dapr.operation", "get_workflow_history"),
+		attribute.String("dapr.workflow.instance_id", args.InstanceID),
+	)
+
+	resp, err := workflowClient.GetInstanceHistory(ctx, args.InstanceID)
+	if err != nil {
+		log.Printf("Dapr GetInstanceHistory failed: %v", err)
+		toolErrorMessage := fmt.Errorf("failed to fetch history of workflow instance '%s': %v", args.InstanceID, err).Error()
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// GetInstanceHistoryResponse is a defined type over the proto message and
+	// does not inherit its getters, so convert back to access them nil-safely.
+	pr := (*protos.GetInstanceHistoryResponse)(resp)
+	events := make([]map[string]any, 0, len(pr.GetEvents()))
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Workflow instance '%s' has %d history event(s).\n", args.InstanceID, len(pr.GetEvents()))
+
+	for _, ev := range pr.GetEvents() {
+		eventType, detail := historyEventSummary(ev)
+
+		event := map[string]any{
+			"event_id": ev.GetEventId(),
+			"type":     eventType,
+		}
+		if ts := ev.GetTimestamp(); ts != nil {
+			event["timestamp"] = ts.AsTime().String()
+		}
+		fmt.Fprintf(&sb, "- #%d %s", ev.GetEventId(), eventType)
+		if detail != "" {
+			event["detail"] = detail
+			fmt.Fprintf(&sb, " (%s)", detail)
+		}
+		sb.WriteString("\n")
+		events = append(events, event)
+	}
+
+	result := sb.String()
+	log.Println(result)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: result}},
+	}, map[string]any{"instance_id": args.InstanceID, "events": events, "count": len(events)}, nil
+}
+
+func rerunWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args RerunWorkflowArgs) (*mcp.CallToolResult, any, error) {
+	ctx, span := otel.Tracer("dapr-mcp-server").Start(ctx, "rerun_workflow")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("dapr.operation", "rerun_workflow"),
+		attribute.String("dapr.workflow.instance_id", args.InstanceID),
+	)
+
+	if args.EventID < 0 || args.EventID > math.MaxUint32 {
+		toolErrorMessage := fmt.Sprintf("invalid eventID %d: must be a valid event ID from get_workflow_history", args.EventID)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	var opts []wf.RerunOptions
+	if args.NewInstanceID != "" {
+		opts = append(opts, wf.RerunOptions(api.WithRerunNewInstanceID(api.InstanceID(args.NewInstanceID))))
+	}
+	if args.Input != "" {
+		// api.WithRerunInput JSON-marshals its argument, which would
+		// double-encode a raw JSON string, so set the raw input directly.
+		opts = append(opts, func(rerunReq *protos.RerunWorkflowFromEventRequest) error {
+			rerunReq.Input = wrapperspb.String(args.Input)
+			rerunReq.OverwriteInput = true
+			return nil
+		})
+	}
+
+	newID, err := workflowClient.RerunWorkflowFromEvent(ctx, args.InstanceID, uint32(args.EventID), opts...)
+	if err != nil {
+		log.Printf("Dapr RerunWorkflowFromEvent failed: %v", err)
+		toolErrorMessage := fmt.Errorf("failed to rerun workflow instance '%s' from event %d: %v", args.InstanceID, args.EventID, err).Error()
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	successMessage := fmt.Sprintf("Successfully started rerun of workflow instance '%s' from event %d as new instance '%s'.", args.InstanceID, args.EventID, newID)
+	log.Println(successMessage)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: successMessage}},
+	}, map[string]any{"source_instance_id": args.InstanceID, "event_id": args.EventID, "new_instance_id": newID}, nil
+}
+
 func listWorkflowsTool(ctx context.Context, req *mcp.CallToolRequest, args ListWorkflowsArgs) (*mcp.CallToolResult, any, error) {
 	ctx, span := otel.Tracer("dapr-mcp-server").Start(ctx, "list_workflows")
 	defer span.End()
@@ -418,7 +587,8 @@ func RegisterTools(server *mcp.Server, client WorkflowClient) {
 			"**GUIDANCE:**\n" +
 			"1. The workflow must be registered by a workflow application connected to the same Dapr sidecar (same app-id) as this server.\n" +
 			"2. Provide `input` as a JSON string when the workflow expects input.\n" +
-			"3. Use `get_workflow_status` afterwards to track progress; workflows run asynchronously.\n\n" +
+			"3. Use `get_workflow_status` afterwards to track progress; workflows run asynchronously.\n" +
+			"4. Provide `startTime` (RFC 3339) to schedule the workflow for a later moment instead of starting it immediately.\n\n" +
 			"**ARGUMENT RULES:**\n" +
 			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `workflowName`.\n" +
 			"2. **NEVER INVENT**: You must NOT invent workflow names. If the workflow name is unknown, ask the user.\n",
@@ -446,6 +616,41 @@ func RegisterTools(server *mcp.Server, client WorkflowClient) {
 			OpenWorldHint:   &isOpenWorld,
 		},
 	}, getWorkflowStatusTool)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:  "get_workflow_history",
+		Title: "Get Workflow Instance History",
+		Description: "Retrieves the full event history of a workflow instance: which activities were scheduled and completed, timers, raised events, and failures with error messages. **This is a READ-ONLY action.**\n\n" +
+			"**GUIDANCE:**\n" +
+			"1. Use this to diagnose WHY a workflow failed or appears stuck; `get_workflow_status` only shows the end result.\n" +
+			"2. The `event_id` values in the history can be used with `rerun_workflow` to rerun a workflow from a specific point.\n\n" +
+			"**ARGUMENT RULES:**\n" +
+			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `instanceID`.\n",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:    true,
+			DestructiveHint: &notDestructive,
+			IdempotentHint:  true,
+			OpenWorldHint:   &isOpenWorld,
+		},
+	}, getWorkflowHistoryTool)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:  "rerun_workflow",
+		Title: "Rerun Workflow From Event",
+		Description: "Reruns a workflow instance from a specific event in its history, creating a NEW instance that reuses the results of all events before that point. Useful to retry a failed workflow without repeating already-completed work. **This is a SIDE-EFFECT action that is NOT IDEMPOTENT** unless an explicit `newInstanceID` is provided.\n\n" +
+			"**GUIDANCE:**\n" +
+			"1. Use `get_workflow_history` first to find the `eventID` to rerun from (typically the failed activity's scheduling event).\n" +
+			"2. Provide `input` only when the rerun should use different input than the original run.\n\n" +
+			"**ARGUMENT RULES:**\n" +
+			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `instanceID` and a valid `eventID`.\n" +
+			"2. **NEVER INVENT**: You must NOT invent event IDs; take them from `get_workflow_history`.\n",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:    false,
+			DestructiveHint: &notDestructive,
+			IdempotentHint:  false,
+			OpenWorldHint:   &isOpenWorld,
+		},
+	}, rerunWorkflowTool)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  "list_workflows",

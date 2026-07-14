@@ -77,9 +77,11 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | state | get_state | Stable | State retrieval |
 | state | delete_state | Stable | State deletion |
 | state | execute_transaction | Stable | Atomic state operations |
-| workflow | start_workflow | Beta | Schedule a new workflow instance |
+| workflow | start_workflow | Beta | Start a workflow instance, optionally at a scheduled time |
 | workflow | get_workflow_status | Beta | Workflow instance status/output |
+| workflow | get_workflow_history | Beta | Full event history of an instance |
 | workflow | list_workflows | Beta | List all instances with status (paginated) |
+| workflow | rerun_workflow | Beta | Rerun an instance from a history event |
 | workflow | pause_workflow | Beta | Suspend a running instance |
 | workflow | resume_workflow | Beta | Resume a suspended instance |
 | workflow | terminate_workflow | Beta | Forcefully end an instance |
