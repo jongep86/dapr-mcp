@@ -79,6 +79,7 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | state | execute_transaction | Stable | Atomic state operations |
 | workflow | start_workflow | Beta | Schedule a new workflow instance |
 | workflow | get_workflow_status | Beta | Workflow instance status/output |
+| workflow | list_workflows | Beta | List all instances with status (paginated) |
 | workflow | pause_workflow | Beta | Suspend a running instance |
 | workflow | resume_workflow | Beta | Resume a suspended instance |
 | workflow | terminate_workflow | Beta | Forcefully end an instance |

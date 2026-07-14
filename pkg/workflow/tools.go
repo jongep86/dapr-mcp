@@ -22,6 +22,7 @@ import (
 type WorkflowClient interface {
 	ScheduleWorkflow(ctx context.Context, workflow string, opts ...wf.NewWorkflowOptions) (string, error)
 	FetchWorkflowMetadata(ctx context.Context, id string, opts ...wf.FetchWorkflowMetadataOptions) (*wf.WorkflowMetadata, error)
+	ListInstanceIDs(ctx context.Context, opts ...wf.ListInstanceIDsOptions) (*wf.ListInstanceIDsResponse, error)
 	SuspendWorkflow(ctx context.Context, id, reason string) error
 	ResumeWorkflow(ctx context.Context, id, reason string) error
 	TerminateWorkflow(ctx context.Context, id string, opts ...wf.TerminateOptions) error
@@ -61,6 +62,11 @@ type RaiseWorkflowEventArgs struct {
 
 type PurgeWorkflowArgs struct {
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the completed, failed, or terminated workflow whose state should be purged."`
+}
+
+type ListWorkflowsArgs struct {
+	Limit             int    `json:"limit,omitempty" jsonschema:"Maximum number of instances to return per call (default 100, max 500)."`
+	ContinuationToken string `json:"continuationToken,omitempty" jsonschema:"Optional continuation token from a previous list_workflows call to fetch the next page."`
 }
 
 var workflowClient WorkflowClient
@@ -293,6 +299,111 @@ func purgeWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Purge
 	}, map[string]any{"instance_id": args.InstanceID, "purged": true}, nil
 }
 
+func listWorkflowsTool(ctx context.Context, req *mcp.CallToolRequest, args ListWorkflowsArgs) (*mcp.CallToolResult, any, error) {
+	ctx, span := otel.Tracer("dapr-mcp-server").Start(ctx, "list_workflows")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("dapr.operation", "list_workflows"),
+	)
+
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	opts := []wf.ListInstanceIDsOptions{
+		wf.ListInstanceIDsOptions(api.WithListInstanceIDsPageSize(uint32(limit))),
+	}
+	if args.ContinuationToken != "" {
+		opts = append(opts, wf.ListInstanceIDsOptions(api.WithListInstanceIDsContinuationToken(args.ContinuationToken)))
+	}
+
+	resp, err := workflowClient.ListInstanceIDs(ctx, opts...)
+	if err != nil {
+		log.Printf("Dapr ListInstanceIDs failed: %v", err)
+		toolErrorMessage := fmt.Errorf("failed to list workflow instances: %v", err).Error()
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// ListInstanceIDsResponse is a defined type over the proto message and
+	// does not inherit its getters, so convert back to access them nil-safely.
+	pr := (*protos.ListInstanceIDsResponse)(resp)
+
+	instances := make([]map[string]any, 0, len(pr.GetInstanceIds()))
+	countsByWorkflow := make(map[string]int)
+	countsByStatus := make(map[string]int)
+	fetchErrors := 0
+	var lines strings.Builder
+
+	for _, id := range pr.GetInstanceIds() {
+		meta, err := workflowClient.FetchWorkflowMetadata(ctx, id)
+		if err != nil {
+			log.Printf("Dapr FetchWorkflowMetadata failed for instance '%s': %v", id, err)
+			fetchErrors++
+			continue
+		}
+		pm := (*protos.WorkflowMetadata)(meta)
+		status := statusString(pm)
+
+		instance := map[string]any{
+			"instance_id":   pm.GetInstanceId(),
+			"workflow_name": pm.GetName(),
+			"status":        status,
+		}
+		if createdAt := pm.GetCreatedAt(); createdAt != nil {
+			instance["created_at"] = createdAt.AsTime().String()
+		}
+		instances = append(instances, instance)
+		countsByWorkflow[pm.GetName()]++
+		countsByStatus[status]++
+		fmt.Fprintf(&lines, "- %s (workflow: %s, status: %s)\n", pm.GetInstanceId(), pm.GetName(), status)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Found %d workflow instance(s).", len(instances))
+	if len(countsByWorkflow) > 0 {
+		sb.WriteString(" Counts by workflow:")
+		for name, count := range countsByWorkflow {
+			fmt.Fprintf(&sb, " %s=%d", name, count)
+		}
+		sb.WriteString(". Counts by status:")
+		for status, count := range countsByStatus {
+			fmt.Fprintf(&sb, " %s=%d", status, count)
+		}
+		sb.WriteString(".")
+	}
+	if fetchErrors > 0 {
+		fmt.Fprintf(&sb, " WARNING: metadata could not be fetched for %d instance(s); they are excluded.", fetchErrors)
+	}
+	if len(instances) > 0 {
+		fmt.Fprintf(&sb, "\n%s", lines.String())
+	}
+
+	structuredResult := map[string]any{
+		"instances":          instances,
+		"count":              len(instances),
+		"counts_by_workflow": countsByWorkflow,
+		"counts_by_status":   countsByStatus,
+	}
+	if token := pr.GetContinuationToken(); token != "" {
+		fmt.Fprintf(&sb, "\nMore instances are available; pass continuationToken '%s' to fetch the next page.", token)
+		structuredResult["continuation_token"] = token
+	}
+
+	result := sb.String()
+	log.Println(result)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: result}},
+	}, structuredResult, nil
+}
+
 func RegisterTools(server *mcp.Server, client WorkflowClient) {
 	workflowClient = client
 
@@ -335,6 +446,21 @@ func RegisterTools(server *mcp.Server, client WorkflowClient) {
 			OpenWorldHint:   &isOpenWorld,
 		},
 	}, getWorkflowStatusTool)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:  "list_workflows",
+		Title: "List Workflow Instances",
+		Description: "Lists all workflow instances known to the workflow engine with their name, runtime status (RUNNING, COMPLETED, FAILED, SUSPENDED, TERMINATED, PENDING), and creation time, plus counts per workflow and per status. **This is a READ-ONLY action.** The tool does NOT filter; apply any filtering (e.g., only RUNNING instances) yourself on the returned list.\n\n" +
+			"**GUIDANCE:**\n" +
+			"1. If a `continuation_token` is returned, call the tool again with it to fetch the remaining instances before drawing conclusions about totals.\n" +
+			"2. Each listed instance ID can be passed to `get_workflow_status` for full details.\n",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:    true,
+			DestructiveHint: &notDestructive,
+			IdempotentHint:  true,
+			OpenWorldHint:   &isOpenWorld,
+		},
+	}, listWorkflowsTool)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  "pause_workflow",

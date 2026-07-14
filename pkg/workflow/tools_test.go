@@ -31,6 +31,14 @@ func (m *mockWorkflowClient) FetchWorkflowMetadata(ctx context.Context, id strin
 	return args.Get(0).(*wf.WorkflowMetadata), args.Error(1)
 }
 
+func (m *mockWorkflowClient) ListInstanceIDs(ctx context.Context, opts ...wf.ListInstanceIDsOptions) (*wf.ListInstanceIDsResponse, error) {
+	args := m.Called(ctx, opts)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*wf.ListInstanceIDsResponse), args.Error(1)
+}
+
 func (m *mockWorkflowClient) SuspendWorkflow(ctx context.Context, id, reason string) error {
 	args := m.Called(ctx, id, reason)
 	return args.Error(0)
@@ -464,6 +472,116 @@ func TestPurgeWorkflowTool(t *testing.T) {
 			mockClient.AssertExpectations(t)
 		})
 	}
+}
+
+func metaWithStatus(id, name string, status protos.OrchestrationStatus) *wf.WorkflowMetadata {
+	return &wf.WorkflowMetadata{
+		InstanceId:    id,
+		Name:          name,
+		RuntimeStatus: status,
+	}
+}
+
+func TestListWorkflowsTool(t *testing.T) {
+	running := protos.OrchestrationStatus_ORCHESTRATION_STATUS_RUNNING
+	completed := protos.OrchestrationStatus_ORCHESTRATION_STATUS_COMPLETED
+
+	tests := []struct {
+		name        string
+		args        ListWorkflowsArgs
+		setupMock   func(*mockWorkflowClient)
+		wantErr     bool
+		wantContent string
+	}{
+		{
+			name: "lists all instances with statuses and counts",
+			args: ListWorkflowsArgs{},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("ListInstanceIDs", mock.Anything, mock.Anything).
+					Return(&wf.ListInstanceIDsResponse{InstanceIds: []string{"a", "b", "c"}}, nil)
+				m.On("FetchWorkflowMetadata", mock.Anything, "a", mock.Anything).
+					Return(metaWithStatus("a", "onboarding", running), nil)
+				m.On("FetchWorkflowMetadata", mock.Anything, "b", mock.Anything).
+					Return(metaWithStatus("b", "estimating", completed), nil)
+				m.On("FetchWorkflowMetadata", mock.Anything, "c", mock.Anything).
+					Return(metaWithStatus("c", "onboarding", running), nil)
+			},
+			wantErr:     false,
+			wantContent: "Found 3 workflow instance(s).",
+		},
+		{
+			name: "list API error",
+			args: ListWorkflowsArgs{},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("ListInstanceIDs", mock.Anything, mock.Anything).
+					Return(nil, errors.New("not supported"))
+			},
+			wantErr:     true,
+			wantContent: "failed to list workflow instances",
+		},
+		{
+			name: "metadata fetch error is reported and instance skipped",
+			args: ListWorkflowsArgs{},
+			setupMock: func(m *mockWorkflowClient) {
+				m.On("ListInstanceIDs", mock.Anything, mock.Anything).
+					Return(&wf.ListInstanceIDsResponse{InstanceIds: []string{"a", "broken"}}, nil)
+				m.On("FetchWorkflowMetadata", mock.Anything, "a", mock.Anything).
+					Return(metaWithStatus("a", "onboarding", running), nil)
+				m.On("FetchWorkflowMetadata", mock.Anything, "broken", mock.Anything).
+					Return(nil, errors.New("actor unavailable"))
+			},
+			wantErr:     false,
+			wantContent: "WARNING: metadata could not be fetched for 1 instance(s)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(mockWorkflowClient)
+			tt.setupMock(mockClient)
+			workflowClient = mockClient
+
+			result, _, err := listWorkflowsTool(context.Background(), &mcp.CallToolRequest{}, tt.args)
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantErr, result.IsError)
+			assertTextContains(t, result, tt.wantContent)
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
+func TestListWorkflowsToolStructuredResult(t *testing.T) {
+	running := protos.OrchestrationStatus_ORCHESTRATION_STATUS_RUNNING
+	token := "next-page-token"
+
+	mockClient := new(mockWorkflowClient)
+	mockClient.On("ListInstanceIDs", mock.Anything, mock.Anything).
+		Return(&wf.ListInstanceIDsResponse{
+			InstanceIds:       []string{"a", "b"},
+			ContinuationToken: &token,
+		}, nil)
+	mockClient.On("FetchWorkflowMetadata", mock.Anything, "a", mock.Anything).
+		Return(metaWithStatus("a", "onboarding", running), nil)
+	mockClient.On("FetchWorkflowMetadata", mock.Anything, "b", mock.Anything).
+		Return(metaWithStatus("b", "onboarding", running), nil)
+	workflowClient = mockClient
+
+	_, structured, err := listWorkflowsTool(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{})
+
+	assert.NoError(t, err)
+	structuredMap, ok := structured.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, 2, structuredMap["count"])
+	assert.Equal(t, "next-page-token", structuredMap["continuation_token"])
+
+	counts, ok := structuredMap["counts_by_workflow"].(map[string]int)
+	assert.True(t, ok)
+	assert.Equal(t, 2, counts["onboarding"])
+
+	statusCounts, ok := structuredMap["counts_by_status"].(map[string]int)
+	assert.True(t, ok)
+	assert.Equal(t, 2, statusCounts["RUNNING"])
 }
 
 func TestRegisterTools(t *testing.T) {
