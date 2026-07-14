@@ -56,12 +56,24 @@ label `"default"`) so it can be labeled in multi-app listings.
 
 ### Tool interface changes
 
-Every workflow tool gains an optional `appID` argument:
+Every workflow tool gains an `appID` argument:
 
-- `appID` omitted → the default client (own sidecar). Fully backwards
-  compatible with single-app setups.
-- `appID` set → the pool client for that app-id. An unknown `appID` returns a
-  tool error listing the configured app-ids (the agent can self-correct).
+- No apps configured: `appID` may be omitted → the default client (own
+  sidecar). Fully backwards compatible with single-app setups.
+- Apps configured: `appID` is **required** on all per-instance tools; the
+  omission returns a tool error listing the configured app-ids. The server's
+  own app-id is accepted as an explicit `appID` for its sidecar.
+- An unknown `appID` returns a tool error listing the configured app-ids
+  (the agent can self-correct).
+
+The required-`appID` rule in multi-app mode is a hardening guard, added
+after field testing: routing a per-instance call (history/status) to a
+sidecar that does not own the instance crashed daprd itself with a nil
+dereference in `wfengine/state.LoadWorkflowState` (observed on Dapr 1.18.1)
+— an agent forgetting `appID` could take down the MCP server's own `dapr
+run`. Requiring the argument turns a fatal sidecar crash into a
+self-correcting hint. This is a Dapr runtime bug (crash instead of a clean
+error); reporting it upstream is tracked separately.
 
 `list_workflows` is the exception with richer semantics:
 

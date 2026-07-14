@@ -849,8 +849,14 @@ func TestClientFor(t *testing.T) {
 	appClient := new(mockWorkflowClient)
 	useClients(t, defClient, "self", map[string]WorkflowClient{"onboarding": appClient})
 
-	t.Run("empty appID resolves to default client", func(t *testing.T) {
-		client, err := clientFor("")
+	t.Run("empty appID is rejected when apps are configured", func(t *testing.T) {
+		_, err := clientFor("")
+		assert.ErrorContains(t, err, "appID is required when multiple workflow apps are configured")
+		assert.ErrorContains(t, err, "onboarding")
+	})
+
+	t.Run("own app-id resolves to default client", func(t *testing.T) {
+		client, err := clientFor("self")
 		assert.NoError(t, err)
 		assert.Equal(t, WorkflowClient(defClient), client)
 	})
@@ -869,10 +875,37 @@ func TestClientFor(t *testing.T) {
 }
 
 func TestClientForWithoutConfiguredApps(t *testing.T) {
-	useClients(t, new(mockWorkflowClient), "self", nil)
+	defClient := new(mockWorkflowClient)
+	useClients(t, defClient, "self", nil)
 
-	_, err := clientFor("anything")
-	assert.ErrorContains(t, err, "no additional workflow apps are configured")
+	t.Run("empty appID resolves to default client", func(t *testing.T) {
+		client, err := clientFor("")
+		assert.NoError(t, err)
+		assert.Equal(t, WorkflowClient(defClient), client)
+	})
+
+	t.Run("unknown appID is rejected", func(t *testing.T) {
+		_, err := clientFor("anything")
+		assert.ErrorContains(t, err, "no additional workflow apps are configured")
+	})
+}
+
+func TestInstanceToolWithoutAppIDIsGuardedInMultiAppMode(t *testing.T) {
+	defClient := new(mockWorkflowClient)
+	useClients(t, defClient, "self", map[string]WorkflowClient{"onboarding": new(mockWorkflowClient)})
+
+	// A history call without appID must be rejected instead of forwarded:
+	// forwarding to a sidecar that does not own the instance can crash daprd
+	// (nil-deref in wfengine, observed on Dapr 1.18.1).
+	result, _, err := getWorkflowHistoryTool(context.Background(), &mcp.CallToolRequest{}, GetWorkflowHistoryArgs{
+		InstanceID: "order-42",
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, result.IsError)
+	assertTextContains(t, result, "appID is required")
+	assertTextContains(t, result, "onboarding")
+	defClient.AssertNotCalled(t, "GetInstanceHistory")
 }
 
 func TestToolWithAppIDRoutesToPoolClient(t *testing.T) {

@@ -163,8 +163,11 @@ one MCP server, map their sidecar gRPC endpoints:
 export DAPR_MCP_SERVER_WORKFLOW_APPS="company-onboarding=localhost:54783,estimating-gate1=localhost:60951"
 ```
 
-Every workflow tool then accepts an optional `appID` argument to target a
-specific app (omit it for the server's own sidecar). `list_workflows` without
+Every workflow tool then takes an `appID` argument to target a specific app.
+When apps are configured, `appID` is **required** on per-instance tools
+(pass the server's own app-id for its sidecar): routing a workflow call to a
+sidecar that does not own the instance can crash daprd itself (nil-deref in
+the workflow engine, observed on Dapr 1.18.1). `list_workflows` without
 `appID` lists across all configured apps and reports counts per app. Note
 that `dapr run` assigns dynamic gRPC ports; use `--dapr-grpc-port` (or stable
 Kubernetes/Catalyst endpoints) for a reliable mapping. See

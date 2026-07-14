@@ -46,9 +46,20 @@ func configuredAppIDs() []string {
 }
 
 // clientFor resolves an appID to a workflow client. An empty appID selects
-// the default client (the server's own sidecar).
+// the default client (the server's own sidecar) — but only when no
+// additional workflow apps are configured: a per-instance call routed to a
+// sidecar that does not own the instance can crash daprd itself (nil-deref
+// in wfengine/state.LoadWorkflowState, observed on Dapr 1.18.1), so in
+// multi-app setups the appID must be explicit. The server's own app-id is
+// accepted as an explicit appID for its sidecar.
 func clientFor(appID string) (WorkflowClient, error) {
 	if appID == "" {
+		if len(workflowClientsByApp) > 0 {
+			return nil, fmt.Errorf("appID is required when multiple workflow apps are configured; pass one of: %s (or '%s' for the server's own sidecar)", strings.Join(configuredAppIDs(), ", "), defaultAppLabel)
+		}
+		return workflowClient, nil
+	}
+	if appID == defaultAppLabel {
 		return workflowClient, nil
 	}
 	if client, ok := workflowClientsByApp[appID]; ok {
@@ -57,5 +68,5 @@ func clientFor(appID string) (WorkflowClient, error) {
 	if len(workflowClientsByApp) == 0 {
 		return nil, fmt.Errorf("unknown appID '%s': no additional workflow apps are configured (DAPR_MCP_SERVER_WORKFLOW_APPS); omit appID to use the server's own sidecar", appID)
 	}
-	return nil, fmt.Errorf("unknown appID '%s': configured apps: %s (omit appID for the server's own sidecar)", appID, strings.Join(configuredAppIDs(), ", "))
+	return nil, fmt.Errorf("unknown appID '%s': configured apps: %s (or '%s' for the server's own sidecar)", appID, strings.Join(configuredAppIDs(), ", "), defaultAppLabel)
 }

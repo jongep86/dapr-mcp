@@ -35,7 +35,7 @@ type WorkflowClient interface {
 }
 
 type StartWorkflowArgs struct {
-	AppID        string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID        string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	WorkflowName string `json:"workflowName" jsonschema:"The name of the workflow to start, as registered by the workflow application (e.g., 'order_processing_workflow')."`
 	InstanceID   string `json:"instanceID,omitempty" jsonschema:"Optional unique instance ID for the new workflow. If omitted, Dapr generates one."`
 	Input        string `json:"input,omitempty" jsonschema:"Optional input for the workflow, typically a JSON string."`
@@ -43,46 +43,46 @@ type StartWorkflowArgs struct {
 }
 
 type GetWorkflowStatusArgs struct {
-	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID      string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to inspect."`
 }
 
 type PauseWorkflowArgs struct {
-	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID      string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to pause."`
 	Reason     string `json:"reason,omitempty" jsonschema:"Optional reason for pausing the workflow."`
 }
 
 type ResumeWorkflowArgs struct {
-	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID      string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to resume."`
 	Reason     string `json:"reason,omitempty" jsonschema:"Optional reason for resuming the workflow."`
 }
 
 type TerminateWorkflowArgs struct {
-	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID      string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to terminate."`
 }
 
 type RaiseWorkflowEventArgs struct {
-	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID      string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow waiting for the event."`
 	EventName  string `json:"eventName" jsonschema:"The name of the event the workflow is waiting for (must match the name used in the workflow code)."`
 	EventData  string `json:"eventData,omitempty" jsonschema:"Optional payload for the event, typically a JSON string."`
 }
 
 type PurgeWorkflowArgs struct {
-	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID      string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the completed, failed, or terminated workflow whose state should be purged."`
 }
 
 type GetWorkflowHistoryArgs struct {
-	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID      string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow whose event history should be retrieved."`
 }
 
 type RerunWorkflowArgs struct {
-	AppID         string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
+	AppID         string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. REQUIRED when multiple workflow apps are configured (the server's own app-id is also accepted); may be omitted only in single-app setups."`
 	InstanceID    string `json:"instanceID" jsonschema:"The instance ID of the (typically failed) workflow to rerun."`
 	EventID       int    `json:"eventID" jsonschema:"The eventId of the history event to rerun from. Use get_workflow_history to find it."`
 	NewInstanceID string `json:"newInstanceID,omitempty" jsonschema:"Optional instance ID for the rerun instance. If omitted, Dapr generates one."`
