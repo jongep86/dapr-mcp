@@ -233,8 +233,11 @@ func main() {
 		mux.HandleFunc("/readyz", healthChecker.ReadinessHandler)
 		mux.HandleFunc("/startupz", healthChecker.StartupHandler)
 
-		// Create MCP SSE handler
-		mcpHandler := mcp.NewSSEHandler(func(request *http.Request) *mcp.Server {
+		// Create MCP Streamable HTTP handler. Streamable HTTP gives every
+		// POST its own response instead of funneling all replies through a
+		// single long-lived SSE GET stream, which could wedge (TCP still
+		// established, logical session dead) and silently drop tool calls.
+		mcpHandler := mcp.NewStreamableHTTPHandler(func(request *http.Request) *mcp.Server {
 			return server
 		}, nil)
 
