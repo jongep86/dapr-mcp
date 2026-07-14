@@ -97,6 +97,7 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DAPR_MCP_SERVER_LOG_LEVEL` | Log level: DEBUG, INFO, WARN, ERROR | `INFO` |
+| `DAPR_MCP_SERVER_WORKFLOW_APPS` | Additional workflow apps as `app-id=host:port` pairs (comma-separated) | (none - own sidecar only) |
 
 #### OpenTelemetry Configuration
 
@@ -151,6 +152,24 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | `DAPR_SENTRY_AUDIENCE` | Expected audience claim | (none - not validated) |
 | `DAPR_SENTRY_TOKEN_HEADER` | Header containing the JWT | `Authorization` |
 | `DAPR_SENTRY_JWKS_REFRESH_INTERVAL` | JWKS cache refresh interval | `5m` |
+
+## Multi-App Workflow Management
+
+Dapr workflow instances are partitioned per app-id: a sidecar only sees the
+workflows of its own app. To manage workflows of multiple applications from
+one MCP server, map their sidecar gRPC endpoints:
+
+```bash
+export DAPR_MCP_SERVER_WORKFLOW_APPS="company-onboarding=localhost:54783,estimating-gate1=localhost:60951"
+```
+
+Every workflow tool then accepts an optional `appID` argument to target a
+specific app (omit it for the server's own sidecar). `list_workflows` without
+`appID` lists across all configured apps and reports counts per app. Note
+that `dapr run` assigns dynamic gRPC ports; use `--dapr-grpc-port` (or stable
+Kubernetes/Catalyst endpoints) for a reliable mapping. See
+[docs/specs/2026-07-14-multi-app-workflows.md](docs/specs/2026-07-14-multi-app-workflows.md)
+for the design.
 
 ## Health Endpoints
 

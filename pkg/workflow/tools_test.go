@@ -813,12 +813,187 @@ func TestRerunWorkflowTool(t *testing.T) {
 	}
 }
 
+// useClients installs a workflow client registry for a test and restores the
+// previous registry afterwards.
+func useClients(t *testing.T, def WorkflowClient, defaultLabel string, byApp map[string]WorkflowClient) {
+	t.Helper()
+	prevDefault, prevPool, prevLabel := workflowClient, workflowClientsByApp, defaultAppLabel
+	workflowClient = def
+	workflowClientsByApp = byApp
+	if defaultLabel != "" {
+		defaultAppLabel = defaultLabel
+	}
+	t.Cleanup(func() {
+		workflowClient, workflowClientsByApp, defaultAppLabel = prevDefault, prevPool, prevLabel
+	})
+}
+
 func TestRegisterTools(t *testing.T) {
 	mockClient := new(mockWorkflowClient)
+	poolClient := new(mockWorkflowClient)
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v1.0.0"}, nil)
 
 	// Should not panic
-	RegisterTools(server, mockClient)
+	RegisterTools(server, mockClient, "my-app", map[string]WorkflowClient{"other": poolClient})
+	t.Cleanup(func() {
+		workflowClient, workflowClientsByApp, defaultAppLabel = nil, nil, "default"
+	})
 
 	assert.Equal(t, mockClient, workflowClient)
+	assert.Equal(t, poolClient, workflowClientsByApp["other"])
+	assert.Equal(t, "my-app", defaultAppLabel)
+}
+
+func TestClientFor(t *testing.T) {
+	defClient := new(mockWorkflowClient)
+	appClient := new(mockWorkflowClient)
+	useClients(t, defClient, "self", map[string]WorkflowClient{"onboarding": appClient})
+
+	t.Run("empty appID resolves to default client", func(t *testing.T) {
+		client, err := clientFor("")
+		assert.NoError(t, err)
+		assert.Equal(t, WorkflowClient(defClient), client)
+	})
+
+	t.Run("configured appID resolves to pool client", func(t *testing.T) {
+		client, err := clientFor("onboarding")
+		assert.NoError(t, err)
+		assert.Equal(t, WorkflowClient(appClient), client)
+	})
+
+	t.Run("unknown appID lists configured apps", func(t *testing.T) {
+		_, err := clientFor("estimating")
+		assert.ErrorContains(t, err, "unknown appID 'estimating'")
+		assert.ErrorContains(t, err, "onboarding")
+	})
+}
+
+func TestClientForWithoutConfiguredApps(t *testing.T) {
+	useClients(t, new(mockWorkflowClient), "self", nil)
+
+	_, err := clientFor("anything")
+	assert.ErrorContains(t, err, "no additional workflow apps are configured")
+}
+
+func TestToolWithAppIDRoutesToPoolClient(t *testing.T) {
+	defClient := new(mockWorkflowClient)
+	appClient := new(mockWorkflowClient)
+	useClients(t, defClient, "self", map[string]WorkflowClient{"onboarding": appClient})
+
+	appClient.On("SuspendWorkflow", mock.Anything, "order-42", "hold").Return(nil)
+
+	result, _, err := pauseWorkflowTool(context.Background(), &mcp.CallToolRequest{}, PauseWorkflowArgs{
+		AppID:      "onboarding",
+		InstanceID: "order-42",
+		Reason:     "hold",
+	})
+
+	assert.NoError(t, err)
+	assert.False(t, result.IsError)
+	appClient.AssertExpectations(t)
+	defClient.AssertNotCalled(t, "SuspendWorkflow")
+}
+
+func TestToolWithUnknownAppIDReturnsError(t *testing.T) {
+	useClients(t, new(mockWorkflowClient), "self", map[string]WorkflowClient{"onboarding": new(mockWorkflowClient)})
+
+	result, _, err := getWorkflowStatusTool(context.Background(), &mcp.CallToolRequest{}, GetWorkflowStatusArgs{
+		AppID:      "nope",
+		InstanceID: "order-42",
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, result.IsError)
+	assertTextContains(t, result, "unknown appID 'nope'")
+}
+
+func TestListWorkflowsFanOut(t *testing.T) {
+	running := protos.OrchestrationStatus_ORCHESTRATION_STATUS_RUNNING
+
+	defClient := new(mockWorkflowClient)
+	defClient.On("ListInstanceIDs", mock.Anything, mock.Anything).
+		Return(&wf.ListInstanceIDsResponse{}, nil)
+
+	onboardingToken := "onboarding-next"
+	onboarding := new(mockWorkflowClient)
+	onboarding.On("ListInstanceIDs", mock.Anything, mock.Anything).
+		Return(&wf.ListInstanceIDsResponse{
+			InstanceIds:       []string{"ob-1", "ob-2"},
+			ContinuationToken: &onboardingToken,
+		}, nil)
+	onboarding.On("FetchWorkflowMetadata", mock.Anything, "ob-1", mock.Anything).
+		Return(metaWithStatus("ob-1", "onboarding_flow", running), nil)
+	onboarding.On("FetchWorkflowMetadata", mock.Anything, "ob-2", mock.Anything).
+		Return(metaWithStatus("ob-2", "onboarding_flow", running), nil)
+
+	estimating := new(mockWorkflowClient)
+	estimating.On("ListInstanceIDs", mock.Anything, mock.Anything).
+		Return(nil, errors.New("sidecar unreachable"))
+
+	useClients(t, defClient, "self", map[string]WorkflowClient{
+		"company-onboarding": onboarding,
+		"estimating-gate1":   estimating,
+	})
+
+	result, structured, err := listWorkflowsTool(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{})
+
+	assert.NoError(t, err)
+	assert.False(t, result.IsError, "fan-out must return partial results, not a hard error")
+	assertTextContains(t, result, "Found 2 workflow instance(s) across 3 app(s)")
+	assertTextContains(t, result, "WARNING: listing failed for app estimating-gate1")
+
+	structuredMap, ok := structured.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, 2, structuredMap["count"])
+
+	countsByApp, ok := structuredMap["counts_by_app"].(map[string]int)
+	assert.True(t, ok)
+	assert.Equal(t, 2, countsByApp["company-onboarding"])
+	assert.Equal(t, 0, countsByApp["self"])
+
+	tokens, ok := structuredMap["continuation_tokens"].(map[string]string)
+	assert.True(t, ok)
+	assert.Equal(t, "onboarding-next", tokens["company-onboarding"])
+
+	instance := structuredMap["instances"].([]map[string]any)[0]
+	assert.Equal(t, "company-onboarding", instance["app_id"])
+}
+
+func TestListWorkflowsFanOutRejectsContinuationToken(t *testing.T) {
+	useClients(t, new(mockWorkflowClient), "self", map[string]WorkflowClient{"onboarding": new(mockWorkflowClient)})
+
+	result, _, err := listWorkflowsTool(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{
+		ContinuationToken: "some-token",
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, result.IsError)
+	assertTextContains(t, result, "continuationToken requires an explicit appID")
+}
+
+func TestListWorkflowsWithAppIDTargetsSingleApp(t *testing.T) {
+	running := protos.OrchestrationStatus_ORCHESTRATION_STATUS_RUNNING
+
+	defClient := new(mockWorkflowClient)
+	onboarding := new(mockWorkflowClient)
+	onboarding.On("ListInstanceIDs", mock.Anything, mock.Anything).
+		Return(&wf.ListInstanceIDsResponse{InstanceIds: []string{"ob-1"}}, nil)
+	onboarding.On("FetchWorkflowMetadata", mock.Anything, "ob-1", mock.Anything).
+		Return(metaWithStatus("ob-1", "onboarding_flow", running), nil)
+
+	useClients(t, defClient, "self", map[string]WorkflowClient{"company-onboarding": onboarding})
+
+	result, structured, err := listWorkflowsTool(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{
+		AppID: "company-onboarding",
+	})
+
+	assert.NoError(t, err)
+	assert.False(t, result.IsError)
+	assertTextContains(t, result, "Found 1 workflow instance(s).")
+
+	structuredMap, ok := structured.(map[string]any)
+	assert.True(t, ok)
+	_, hasCountsByApp := structuredMap["counts_by_app"]
+	assert.False(t, hasCountsByApp, "single-app listing must not report counts_by_app")
+	defClient.AssertNotCalled(t, "ListInstanceIDs")
 }

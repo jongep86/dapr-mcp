@@ -35,6 +35,7 @@ type WorkflowClient interface {
 }
 
 type StartWorkflowArgs struct {
+	AppID        string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	WorkflowName string `json:"workflowName" jsonschema:"The name of the workflow to start, as registered by the workflow application (e.g., 'order_processing_workflow')."`
 	InstanceID   string `json:"instanceID,omitempty" jsonschema:"Optional unique instance ID for the new workflow. If omitted, Dapr generates one."`
 	Input        string `json:"input,omitempty" jsonschema:"Optional input for the workflow, typically a JSON string."`
@@ -42,38 +43,46 @@ type StartWorkflowArgs struct {
 }
 
 type GetWorkflowStatusArgs struct {
+	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to inspect."`
 }
 
 type PauseWorkflowArgs struct {
+	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to pause."`
 	Reason     string `json:"reason,omitempty" jsonschema:"Optional reason for pausing the workflow."`
 }
 
 type ResumeWorkflowArgs struct {
+	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to resume."`
 	Reason     string `json:"reason,omitempty" jsonschema:"Optional reason for resuming the workflow."`
 }
 
 type TerminateWorkflowArgs struct {
+	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow to terminate."`
 }
 
 type RaiseWorkflowEventArgs struct {
+	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow waiting for the event."`
 	EventName  string `json:"eventName" jsonschema:"The name of the event the workflow is waiting for (must match the name used in the workflow code)."`
 	EventData  string `json:"eventData,omitempty" jsonschema:"Optional payload for the event, typically a JSON string."`
 }
 
 type PurgeWorkflowArgs struct {
+	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the completed, failed, or terminated workflow whose state should be purged."`
 }
 
 type GetWorkflowHistoryArgs struct {
+	AppID      string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID string `json:"instanceID" jsonschema:"The instance ID of the workflow whose event history should be retrieved."`
 }
 
 type RerunWorkflowArgs struct {
+	AppID         string `json:"appID,omitempty" jsonschema:"Optional app ID of the workflow application to target, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to use the server's own sidecar."`
 	InstanceID    string `json:"instanceID" jsonschema:"The instance ID of the (typically failed) workflow to rerun."`
 	EventID       int    `json:"eventID" jsonschema:"The eventId of the history event to rerun from. Use get_workflow_history to find it."`
 	NewInstanceID string `json:"newInstanceID,omitempty" jsonschema:"Optional instance ID for the rerun instance. If omitted, Dapr generates one."`
@@ -81,11 +90,29 @@ type RerunWorkflowArgs struct {
 }
 
 type ListWorkflowsArgs struct {
+	AppID             string `json:"appID,omitempty" jsonschema:"Optional app ID to list workflows for, as configured in DAPR_MCP_SERVER_WORKFLOW_APPS. Omit to list across the server's own sidecar AND all configured apps."`
 	Limit             int    `json:"limit,omitempty" jsonschema:"Maximum number of instances to return per call (default 100, max 500)."`
 	ContinuationToken string `json:"continuationToken,omitempty" jsonschema:"Optional continuation token from a previous list_workflows call to fetch the next page."`
 }
 
-var workflowClient WorkflowClient
+var (
+	// workflowClient targets the server's own sidecar (the default app).
+	workflowClient WorkflowClient
+	// workflowClientsByApp holds clients for additional workflow apps
+	// configured via DAPR_MCP_SERVER_WORKFLOW_APPS.
+	workflowClientsByApp map[string]WorkflowClient
+	// defaultAppLabel is the app-id of the server's own sidecar, used to
+	// label the default client in multi-app listings.
+	defaultAppLabel = "default"
+)
+
+// toolError builds an error CallToolResult with the given message.
+func toolError(message string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: message}},
+		IsError: true,
+	}
+}
 
 // statusString converts a runtime status like ORCHESTRATION_STATUS_RUNNING to RUNNING.
 func statusString(meta *protos.WorkflowMetadata) string {
@@ -100,6 +127,11 @@ func startWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Start
 		attribute.String("dapr.workflow.name", args.WorkflowName),
 	)
 
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
 	var opts []wf.NewWorkflowOptions
 	if args.InstanceID != "" {
 		opts = append(opts, wf.NewWorkflowOptions(api.WithInstanceID(api.InstanceID(args.InstanceID))))
@@ -108,9 +140,9 @@ func startWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Start
 		opts = append(opts, wf.NewWorkflowOptions(api.WithRawInput(wrapperspb.String(args.Input))))
 	}
 	if args.StartTime != "" {
-		startTime, err := time.Parse(time.RFC3339, args.StartTime)
-		if err != nil {
-			toolErrorMessage := fmt.Errorf("invalid startTime '%s': must be RFC 3339 (e.g., '2026-07-15T06:00:00Z'): %v", args.StartTime, err).Error()
+		startTime, parseErr := time.Parse(time.RFC3339, args.StartTime)
+		if parseErr != nil {
+			toolErrorMessage := fmt.Errorf("invalid startTime '%s': must be RFC 3339 (e.g., '2026-07-15T06:00:00Z'): %v", args.StartTime, parseErr).Error()
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
 				IsError: true,
@@ -119,7 +151,7 @@ func startWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Start
 		opts = append(opts, wf.NewWorkflowOptions(api.WithStartTime(startTime)))
 	}
 
-	id, err := workflowClient.ScheduleWorkflow(ctx, args.WorkflowName, opts...)
+	id, err := client.ScheduleWorkflow(ctx, args.WorkflowName, opts...)
 	if err == nil && args.StartTime != "" {
 		successMessage := fmt.Sprintf("Successfully scheduled workflow '%s' with instance ID '%s' to start at %s.", args.WorkflowName, id, args.StartTime)
 		log.Println(successMessage)
@@ -152,7 +184,12 @@ func getWorkflowStatusTool(ctx context.Context, req *mcp.CallToolRequest, args G
 		attribute.String("dapr.workflow.instance_id", args.InstanceID),
 	)
 
-	meta, err := workflowClient.FetchWorkflowMetadata(ctx, args.InstanceID, wf.FetchWorkflowMetadataOptions(api.WithFetchPayloads(true)))
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
+	meta, err := client.FetchWorkflowMetadata(ctx, args.InstanceID, wf.FetchWorkflowMetadataOptions(api.WithFetchPayloads(true)))
 	if err != nil {
 		log.Printf("Dapr FetchWorkflowMetadata failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to fetch status of workflow instance '%s': %v", args.InstanceID, err).Error()
@@ -210,7 +247,12 @@ func pauseWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Pause
 		attribute.String("dapr.workflow.instance_id", args.InstanceID),
 	)
 
-	if err := workflowClient.SuspendWorkflow(ctx, args.InstanceID, args.Reason); err != nil {
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
+	if err := client.SuspendWorkflow(ctx, args.InstanceID, args.Reason); err != nil {
 		log.Printf("Dapr SuspendWorkflow failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to pause workflow instance '%s': %v", args.InstanceID, err).Error()
 		return &mcp.CallToolResult{
@@ -235,7 +277,12 @@ func resumeWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Resu
 		attribute.String("dapr.workflow.instance_id", args.InstanceID),
 	)
 
-	if err := workflowClient.ResumeWorkflow(ctx, args.InstanceID, args.Reason); err != nil {
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
+	if err := client.ResumeWorkflow(ctx, args.InstanceID, args.Reason); err != nil {
 		log.Printf("Dapr ResumeWorkflow failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to resume workflow instance '%s': %v", args.InstanceID, err).Error()
 		return &mcp.CallToolResult{
@@ -260,7 +307,12 @@ func terminateWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args T
 		attribute.String("dapr.workflow.instance_id", args.InstanceID),
 	)
 
-	if err := workflowClient.TerminateWorkflow(ctx, args.InstanceID); err != nil {
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
+	if err := client.TerminateWorkflow(ctx, args.InstanceID); err != nil {
 		log.Printf("Dapr TerminateWorkflow failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to terminate workflow instance '%s': %v", args.InstanceID, err).Error()
 		return &mcp.CallToolResult{
@@ -286,12 +338,17 @@ func raiseWorkflowEventTool(ctx context.Context, req *mcp.CallToolRequest, args 
 		attribute.String("dapr.workflow.event_name", args.EventName),
 	)
 
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
 	var opts []wf.RaiseEventOptions
 	if args.EventData != "" {
 		opts = append(opts, wf.RaiseEventOptions(api.WithRawEventData(wrapperspb.String(args.EventData))))
 	}
 
-	if err := workflowClient.RaiseEvent(ctx, args.InstanceID, args.EventName, opts...); err != nil {
+	if err := client.RaiseEvent(ctx, args.InstanceID, args.EventName, opts...); err != nil {
 		log.Printf("Dapr RaiseEvent failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to raise event '%s' for workflow instance '%s': %v", args.EventName, args.InstanceID, err).Error()
 		return &mcp.CallToolResult{
@@ -316,7 +373,12 @@ func purgeWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Purge
 		attribute.String("dapr.workflow.instance_id", args.InstanceID),
 	)
 
-	if err := workflowClient.PurgeWorkflowState(ctx, args.InstanceID); err != nil {
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
+	if err := client.PurgeWorkflowState(ctx, args.InstanceID); err != nil {
 		log.Printf("Dapr PurgeWorkflowState failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to purge workflow instance '%s': %v", args.InstanceID, err).Error()
 		return &mcp.CallToolResult{
@@ -375,7 +437,12 @@ func getWorkflowHistoryTool(ctx context.Context, req *mcp.CallToolRequest, args 
 		attribute.String("dapr.workflow.instance_id", args.InstanceID),
 	)
 
-	resp, err := workflowClient.GetInstanceHistory(ctx, args.InstanceID)
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
+	resp, err := client.GetInstanceHistory(ctx, args.InstanceID)
 	if err != nil {
 		log.Printf("Dapr GetInstanceHistory failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to fetch history of workflow instance '%s': %v", args.InstanceID, err).Error()
@@ -436,6 +503,11 @@ func rerunWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Rerun
 		}, nil, nil
 	}
 
+	client, err := clientFor(args.AppID)
+	if err != nil {
+		return toolError(err.Error()), nil, nil
+	}
+
 	var opts []wf.RerunOptions
 	if args.NewInstanceID != "" {
 		opts = append(opts, wf.RerunOptions(api.WithRerunNewInstanceID(api.InstanceID(args.NewInstanceID))))
@@ -450,7 +522,7 @@ func rerunWorkflowTool(ctx context.Context, req *mcp.CallToolRequest, args Rerun
 		})
 	}
 
-	newID, err := workflowClient.RerunWorkflowFromEvent(ctx, args.InstanceID, uint32(args.EventID), opts...)
+	newID, err := client.RerunWorkflowFromEvent(ctx, args.InstanceID, uint32(args.EventID), opts...)
 	if err != nil {
 		log.Printf("Dapr RerunWorkflowFromEvent failed: %v", err)
 		toolErrorMessage := fmt.Errorf("failed to rerun workflow instance '%s' from event %d: %v", args.InstanceID, args.EventID, err).Error()
@@ -483,59 +555,106 @@ func listWorkflowsTool(ctx context.Context, req *mcp.CallToolRequest, args ListW
 		limit = 500
 	}
 
-	opts := []wf.ListInstanceIDsOptions{
-		wf.ListInstanceIDsOptions(api.WithListInstanceIDsPageSize(uint32(limit))),
+	// Resolve the targets: one app when appID is set (or no extra apps are
+	// configured), otherwise fan out over the default sidecar and all
+	// configured apps.
+	type appTarget struct {
+		label  string
+		client WorkflowClient
 	}
-	if args.ContinuationToken != "" {
-		opts = append(opts, wf.ListInstanceIDsOptions(api.WithListInstanceIDsContinuationToken(args.ContinuationToken)))
+	var targets []appTarget
+	fanOut := false
+	if args.AppID != "" {
+		client, err := clientFor(args.AppID)
+		if err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		targets = []appTarget{{label: args.AppID, client: client}}
+	} else if len(workflowClientsByApp) == 0 {
+		targets = []appTarget{{label: defaultAppLabel, client: workflowClient}}
+	} else {
+		fanOut = true
+		if args.ContinuationToken != "" {
+			return toolError("continuationToken requires an explicit appID when multiple workflow apps are configured; pass the appID the token belongs to"), nil, nil
+		}
+		targets = []appTarget{{label: defaultAppLabel, client: workflowClient}}
+		for _, appID := range configuredAppIDs() {
+			targets = append(targets, appTarget{label: appID, client: workflowClientsByApp[appID]})
+		}
 	}
 
-	resp, err := workflowClient.ListInstanceIDs(ctx, opts...)
-	if err != nil {
-		log.Printf("Dapr ListInstanceIDs failed: %v", err)
-		toolErrorMessage := fmt.Errorf("failed to list workflow instances: %v", err).Error()
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
-			IsError: true,
-		}, nil, nil
-	}
-
-	// ListInstanceIDsResponse is a defined type over the proto message and
-	// does not inherit its getters, so convert back to access them nil-safely.
-	pr := (*protos.ListInstanceIDsResponse)(resp)
-
-	instances := make([]map[string]any, 0, len(pr.GetInstanceIds()))
+	instances := make([]map[string]any, 0)
 	countsByWorkflow := make(map[string]int)
 	countsByStatus := make(map[string]int)
+	countsByApp := make(map[string]int)
+	continuationTokens := make(map[string]string)
+	var appErrors []string
 	fetchErrors := 0
 	var lines strings.Builder
 
-	for _, id := range pr.GetInstanceIds() {
-		meta, err := workflowClient.FetchWorkflowMetadata(ctx, id)
+	for _, target := range targets {
+		opts := []wf.ListInstanceIDsOptions{
+			wf.ListInstanceIDsOptions(api.WithListInstanceIDsPageSize(uint32(limit))),
+		}
+		if args.ContinuationToken != "" {
+			opts = append(opts, wf.ListInstanceIDsOptions(api.WithListInstanceIDsContinuationToken(args.ContinuationToken)))
+		}
+
+		resp, err := target.client.ListInstanceIDs(ctx, opts...)
 		if err != nil {
-			log.Printf("Dapr FetchWorkflowMetadata failed for instance '%s': %v", id, err)
-			fetchErrors++
+			log.Printf("Dapr ListInstanceIDs failed for app '%s': %v", target.label, err)
+			if !fanOut {
+				return toolError(fmt.Sprintf("failed to list workflow instances for app '%s': %v", target.label, err)), nil, nil
+			}
+			appErrors = append(appErrors, fmt.Sprintf("%s: %v", target.label, err))
 			continue
 		}
-		pm := (*protos.WorkflowMetadata)(meta)
-		status := statusString(pm)
 
-		instance := map[string]any{
-			"instance_id":   pm.GetInstanceId(),
-			"workflow_name": pm.GetName(),
-			"status":        status,
+		// ListInstanceIDsResponse is a defined type over the proto message and
+		// does not inherit its getters, so convert back to access them nil-safely.
+		pr := (*protos.ListInstanceIDsResponse)(resp)
+
+		for _, id := range pr.GetInstanceIds() {
+			meta, err := target.client.FetchWorkflowMetadata(ctx, id)
+			if err != nil {
+				log.Printf("Dapr FetchWorkflowMetadata failed for instance '%s' (app '%s'): %v", id, target.label, err)
+				fetchErrors++
+				continue
+			}
+			pm := (*protos.WorkflowMetadata)(meta)
+			status := statusString(pm)
+
+			instance := map[string]any{
+				"instance_id":   pm.GetInstanceId(),
+				"workflow_name": pm.GetName(),
+				"status":        status,
+				"app_id":        target.label,
+			}
+			if createdAt := pm.GetCreatedAt(); createdAt != nil {
+				instance["created_at"] = createdAt.AsTime().String()
+			}
+			instances = append(instances, instance)
+			countsByWorkflow[pm.GetName()]++
+			countsByStatus[status]++
+			countsByApp[target.label]++
+			if fanOut {
+				fmt.Fprintf(&lines, "- %s (app: %s, workflow: %s, status: %s)\n", pm.GetInstanceId(), target.label, pm.GetName(), status)
+			} else {
+				fmt.Fprintf(&lines, "- %s (workflow: %s, status: %s)\n", pm.GetInstanceId(), pm.GetName(), status)
+			}
 		}
-		if createdAt := pm.GetCreatedAt(); createdAt != nil {
-			instance["created_at"] = createdAt.AsTime().String()
+
+		if token := pr.GetContinuationToken(); token != "" {
+			continuationTokens[target.label] = token
 		}
-		instances = append(instances, instance)
-		countsByWorkflow[pm.GetName()]++
-		countsByStatus[status]++
-		fmt.Fprintf(&lines, "- %s (workflow: %s, status: %s)\n", pm.GetInstanceId(), pm.GetName(), status)
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Found %d workflow instance(s).", len(instances))
+	if fanOut {
+		fmt.Fprintf(&sb, "Found %d workflow instance(s) across %d app(s).", len(instances), len(targets))
+	} else {
+		fmt.Fprintf(&sb, "Found %d workflow instance(s).", len(instances))
+	}
 	if len(countsByWorkflow) > 0 {
 		sb.WriteString(" Counts by workflow:")
 		for name, count := range countsByWorkflow {
@@ -546,9 +665,19 @@ func listWorkflowsTool(ctx context.Context, req *mcp.CallToolRequest, args ListW
 			fmt.Fprintf(&sb, " %s=%d", status, count)
 		}
 		sb.WriteString(".")
+		if fanOut {
+			sb.WriteString(" Counts by app:")
+			for _, target := range targets {
+				fmt.Fprintf(&sb, " %s=%d", target.label, countsByApp[target.label])
+			}
+			sb.WriteString(".")
+		}
 	}
 	if fetchErrors > 0 {
 		fmt.Fprintf(&sb, " WARNING: metadata could not be fetched for %d instance(s); they are excluded.", fetchErrors)
+	}
+	for _, appError := range appErrors {
+		fmt.Fprintf(&sb, " WARNING: listing failed for app %s; its instances are missing.", appError)
 	}
 	if len(instances) > 0 {
 		fmt.Fprintf(&sb, "\n%s", lines.String())
@@ -560,9 +689,23 @@ func listWorkflowsTool(ctx context.Context, req *mcp.CallToolRequest, args ListW
 		"counts_by_workflow": countsByWorkflow,
 		"counts_by_status":   countsByStatus,
 	}
-	if token := pr.GetContinuationToken(); token != "" {
-		fmt.Fprintf(&sb, "\nMore instances are available; pass continuationToken '%s' to fetch the next page.", token)
-		structuredResult["continuation_token"] = token
+	if fanOut {
+		structuredResult["counts_by_app"] = countsByApp
+	}
+	if len(appErrors) > 0 {
+		structuredResult["app_errors"] = appErrors
+	}
+	if len(continuationTokens) > 0 {
+		if fanOut {
+			structuredResult["continuation_tokens"] = continuationTokens
+			for appID, token := range continuationTokens {
+				fmt.Fprintf(&sb, "\nMore instances are available for app '%s'; call again with appID '%s' and continuationToken '%s'.", appID, appID, token)
+			}
+		} else {
+			token := continuationTokens[targets[0].label]
+			structuredResult["continuation_token"] = token
+			fmt.Fprintf(&sb, "\nMore instances are available; pass continuationToken '%s' to fetch the next page.", token)
+		}
 	}
 
 	result := sb.String()
@@ -573,8 +716,15 @@ func listWorkflowsTool(ctx context.Context, req *mcp.CallToolRequest, args ListW
 	}, structuredResult, nil
 }
 
-func RegisterTools(server *mcp.Server, client WorkflowClient) {
-	workflowClient = client
+// RegisterTools registers the workflow tools. defaultClient targets the
+// server's own sidecar (labeled defaultAppID in listings); byAppID holds
+// clients for additional workflow apps, keyed by app-id.
+func RegisterTools(server *mcp.Server, defaultClient WorkflowClient, defaultAppID string, byAppID map[string]WorkflowClient) {
+	workflowClient = defaultClient
+	workflowClientsByApp = byAppID
+	if defaultAppID != "" {
+		defaultAppLabel = defaultAppID
+	}
 
 	notDestructive := false
 	destructive := true
@@ -657,8 +807,9 @@ func RegisterTools(server *mcp.Server, client WorkflowClient) {
 		Title: "List Workflow Instances",
 		Description: "Lists all workflow instances known to the workflow engine with their name, runtime status (RUNNING, COMPLETED, FAILED, SUSPENDED, TERMINATED, PENDING), and creation time, plus counts per workflow and per status. **This is a READ-ONLY action.** The tool does NOT filter; apply any filtering (e.g., only RUNNING instances) yourself on the returned list.\n\n" +
 			"**GUIDANCE:**\n" +
-			"1. If a `continuation_token` is returned, call the tool again with it to fetch the remaining instances before drawing conclusions about totals.\n" +
-			"2. Each listed instance ID can be passed to `get_workflow_status` for full details.\n",
+			"1. When multiple workflow apps are configured and `appID` is omitted, the tool lists across ALL apps and additionally reports counts per app; pass `appID` to list a single app.\n" +
+			"2. If a continuation token is returned, call the tool again with it (and, in multi-app setups, the matching `appID`) to fetch the remaining instances before drawing conclusions about totals.\n" +
+			"3. Each listed instance ID can be passed to `get_workflow_status` for full details (pass the same `appID` the instance was listed under).\n",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    true,
 			DestructiveHint: &notDestructive,

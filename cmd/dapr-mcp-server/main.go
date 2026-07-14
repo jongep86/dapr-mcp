@@ -149,8 +149,35 @@ func main() {
 	actor.RegisterTools(server, DaprClient)
 
 	// Workflow management is part of the Dapr runtime (no component required);
-	// the workflow client reuses the existing sidecar gRPC connection.
-	workflow.RegisterTools(server, dtworkflow.NewClient(DaprClient.GrpcClientConn()))
+	// the default workflow client reuses the existing sidecar gRPC connection.
+	// Additional workflow apps can be configured via
+	// DAPR_MCP_SERVER_WORKFLOW_APPS=app-id=host:port,... — one client each.
+	workflowApps, err := workflow.ParseAppsConfig(os.Getenv("DAPR_MCP_SERVER_WORKFLOW_APPS"))
+	if err != nil {
+		logger.Error("Fatal error: invalid DAPR_MCP_SERVER_WORKFLOW_APPS", "error", err)
+		os.Exit(1)
+	}
+	workflowPool := make(map[string]workflow.WorkflowClient, len(workflowApps))
+	for appID, addr := range workflowApps {
+		appClient, appErr := dapr.NewClientWithAddressContext(ctx, addr)
+		if appErr != nil {
+			logger.Error("Fatal error: could not connect workflow app",
+				"app_id", appID,
+				"address", addr,
+				"error", appErr,
+			)
+			os.Exit(1)
+		}
+		workflowPool[appID] = dtworkflow.NewClient(appClient.GrpcClientConn())
+		logger.Info("Workflow app connected", "app_id", appID, "address", addr)
+	}
+
+	// Label the default client with the sidecar's own app-id in listings.
+	defaultAppID := ""
+	if meta, metaErr := DaprClient.GetMetadata(ctx); metaErr == nil && meta != nil {
+		defaultAppID = meta.ID
+	}
+	workflow.RegisterTools(server, dtworkflow.NewClient(DaprClient.GrpcClientConn()), defaultAppID, workflowPool)
 
 	// Discover components and register conditional tools
 	componentPresence := make(map[string]bool)
