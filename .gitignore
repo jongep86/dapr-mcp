@@ -11,6 +11,9 @@
 # Test binary, built with `go test -c`
 *.test
 
+# Built server binary (repo-root only; not the cmd/dapr-mcp-server/ package dir)
+/dapr-mcp-server
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*
