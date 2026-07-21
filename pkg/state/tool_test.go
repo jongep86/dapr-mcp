@@ -151,6 +151,89 @@ func TestGetStateTool(t *testing.T) {
 	}
 }
 
+func TestGetBulkStateTool(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        GetBulkStateArgs
+		setupMock   func(*mocks.MockDaprClient)
+		wantErr     bool
+		wantContent string
+	}{
+		{
+			name: "successful bulk get",
+			args: GetBulkStateArgs{
+				StoreName: "statestore",
+				Keys:      []string{"k1", "k2"},
+			},
+			setupMock: func(m *mocks.MockDaprClient) {
+				m.On("GetBulkState", mock.Anything, "statestore", []string{"k1", "k2"}, mock.Anything, int32(0)).
+					Return([]*client.BulkStateItem{
+						{Key: "k1", Value: []byte(`v1`), Etag: "1"},
+						{Key: "k2", Value: []byte(`v2`), Etag: "2"},
+					}, nil)
+			},
+			wantErr:     false,
+			wantContent: "Retrieved 2 key(s) from state store 'statestore'.",
+		},
+		{
+			name: "item with per-key error is surfaced",
+			args: GetBulkStateArgs{
+				StoreName: "statestore",
+				Keys:      []string{"k1", "k2"},
+			},
+			setupMock: func(m *mocks.MockDaprClient) {
+				m.On("GetBulkState", mock.Anything, "statestore", []string{"k1", "k2"}, mock.Anything, int32(0)).
+					Return([]*client.BulkStateItem{
+						{Key: "k1", Value: []byte(`v1`), Etag: "1"},
+						{Key: "k2", Error: "key not found"},
+					}, nil)
+			},
+			wantErr:     false,
+			wantContent: "Retrieved 2 key(s) from state store 'statestore'.",
+		},
+		{
+			name: "bulk get failure",
+			args: GetBulkStateArgs{
+				StoreName: "statestore",
+				Keys:      []string{"k1", "k2"},
+			},
+			setupMock: func(m *mocks.MockDaprClient) {
+				m.On("GetBulkState", mock.Anything, "statestore", []string{"k1", "k2"}, mock.Anything, int32(0)).
+					Return(nil, errors.New("connection refused"))
+			},
+			wantErr:     true,
+			wantContent: "dapr GetBulkState failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(mocks.MockDaprClient)
+			tt.setupMock(mockClient)
+
+			stateClient = mockClient
+
+			result, structured, err := getBulkStateTool(context.Background(), &mcp.CallToolRequest{}, tt.args)
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantErr, result.IsError)
+			if len(result.Content) > 0 {
+				textContent, ok := result.Content[0].(*mcp.TextContent)
+				assert.True(t, ok)
+				assert.Contains(t, textContent.Text, tt.wantContent)
+			}
+
+			if tt.name == "item with per-key error is surfaced" {
+				items, ok := structured.([]map[string]string)
+				assert.True(t, ok)
+				assert.Equal(t, "key not found", items[1]["error"])
+			}
+
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
 func TestDeleteStateTool(t *testing.T) {
 	tests := []struct {
 		name        string
