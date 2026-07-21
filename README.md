@@ -74,6 +74,7 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | secrets | get_bulk_secrets | Stable | Bulk secret retrieval |
 | state | save_state | Stable | State persistence |
 | state | get_state | Stable | State retrieval |
+| state | get_bulk_state | Beta | Bulk state retrieval |
 | state | delete_state | Stable | State deletion |
 | state | execute_transaction | Stable | Atomic state operations |
 

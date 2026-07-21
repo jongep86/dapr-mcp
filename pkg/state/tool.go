@@ -17,6 +17,7 @@ import (
 type StateClient interface {
 	SaveState(ctx context.Context, storeName, key string, data []byte, meta map[string]string, so ...dapr.StateOption) error
 	GetState(ctx context.Context, storeName, key string, meta map[string]string) (*dapr.StateItem, error)
+	GetBulkState(ctx context.Context, storeName string, keys []string, meta map[string]string, parallelism int32) ([]*dapr.BulkStateItem, error)
 	DeleteState(ctx context.Context, storeName, key string, meta map[string]string) error
 	ExecuteStateTransaction(ctx context.Context, storeName string, meta map[string]string, ops []*dapr.StateOperation) error
 }
@@ -30,6 +31,12 @@ type SaveStateArgs struct {
 type GetStateArgs struct {
 	StoreName string `json:"storeName" jsonschema:"The name of the Dapr state store component (e.g., 'statestore')."`
 	Key       string `json:"key" jsonschema:"The key whose value should be retrieved."`
+}
+
+type GetBulkStateArgs struct {
+	StoreName   string   `json:"storeName" jsonschema:"The name of the Dapr state store component (e.g., 'statestore')."`
+	Keys        []string `json:"keys" jsonschema:"The list of keys whose values should be retrieved."`
+	Parallelism int32    `json:"parallelism" jsonschema:"Optional. Max number of parallel reads the state store performs; 0 lets Dapr choose a default."`
 }
 
 type DeleteStateArgs struct {
@@ -117,6 +124,46 @@ func getStateTool(ctx context.Context, req *mcp.CallToolRequest, args GetStateAr
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result}},
+	}, structuredResult, nil
+}
+
+func getBulkStateTool(ctx context.Context, req *mcp.CallToolRequest, args GetBulkStateArgs) (*mcp.CallToolResult, any, error) {
+	ctx, span := otel.Tracer("dapr-mcp-server").Start(ctx, "get_bulk_state")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("dapr.operation", "get_bulk_state"),
+		attribute.String("dapr.store", args.StoreName),
+		attribute.Int("dapr.keys_count", len(args.Keys)),
+	)
+
+	items, err := stateClient.GetBulkState(ctx, args.StoreName, args.Keys, nil, args.Parallelism)
+	if err != nil {
+		log.Printf("Dapr GetBulkState failed: %v", err)
+		toolErrorMessage := fmt.Errorf("dapr GetBulkState failed: %v", err).Error()
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: toolErrorMessage}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	structuredResult := make([]map[string]string, 0, len(items))
+	for _, item := range items {
+		entry := map[string]string{
+			"key":   item.Key,
+			"value": string(item.Value),
+			"etag":  item.Etag,
+		}
+		if item.Error != "" {
+			entry["error"] = item.Error
+		}
+		structuredResult = append(structuredResult, entry)
+	}
+
+	successMessage := fmt.Sprintf("Retrieved %d key(s) from state store '%s'.", len(items), args.StoreName)
+	log.Println(successMessage)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: successMessage}},
 	}, structuredResult, nil
 }
 
@@ -243,6 +290,23 @@ func RegisterTools(server *mcp.Server, client StateClient) {
 			IdempotentHint: isIdempotent,
 		},
 	}, getStateTool)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:  "get_bulk_state",
+		Title: "Retrieve Multiple Keys' State in Bulk",
+		Description: "Retrieves the values for multiple keys from a Dapr state store in a single call. **This is a Data Retrieval operation and IS IDEMPOTENT.** Use to efficiently fetch several pieces of application state at once instead of issuing repeated `get_state` calls.\n\n" +
+			"**GUIDANCE:**\n" +
+			"1. Use `get_components` to find the `StoreName` of the state store.\n" +
+			"2. Provide the full list of `Keys` to retrieve; each result includes its `key`, `value`, and `etag`.\n\n" +
+			"**ARGUMENT RULES:**\n" +
+			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `StoreName` and a non-empty list of `Keys`.\n" +
+			"2. **NEVER INVENT**: Never invent a `Key`; each must be provided by the user or discovered.\n" +
+			"3. **PARALLELISM**: `Parallelism` is optional; leave it at 0 to let Dapr choose a default.\n" +
+			"4. **CLARIFICATION**: If any required input is missing, you MUST ask the user for clarification.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:   isReadOnly,
+			IdempotentHint: isIdempotent,
+		},
+	}, getBulkStateTool)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  "delete_state",
 		Title: "Delete State Key",
