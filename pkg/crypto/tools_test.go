@@ -209,6 +209,48 @@ func TestDecryptTool(t *testing.T) {
 	}
 }
 
+func TestCryptoToolsTextContentIncludesPayload(t *testing.T) {
+	// Many MCP clients (e.g. Claude Desktop via mcp-remote) only surface text
+	// content to the model; payloads that live solely in the structured
+	// result never reach it. The cipher/plain text must therefore appear in
+	// the text content itself.
+	t.Run("encrypt includes cipher text", func(t *testing.T) {
+		mockClient := new(mocks.MockDaprClient)
+		mockClient.On("Encrypt", mock.Anything, mock.Anything, mock.AnythingOfType("client.EncryptOptions")).
+			Return(io.NopCloser(strings.NewReader("encrypted-data-base64")), nil)
+		cryptoClient = mockClient
+
+		result, _, err := encryptTool(context.Background(), &mcp.CallToolRequest{}, EncryptArgs{
+			ComponentName: "crypto-vault",
+			PlainText:     "secret message",
+		})
+
+		assert.NoError(t, err)
+		assert.False(t, result.IsError)
+		textContent, ok := result.Content[0].(*mcp.TextContent)
+		assert.True(t, ok)
+		assert.Contains(t, textContent.Text, "encrypted-data-base64")
+	})
+
+	t.Run("decrypt includes plain text", func(t *testing.T) {
+		mockClient := new(mocks.MockDaprClient)
+		mockClient.On("Decrypt", mock.Anything, mock.Anything, mock.AnythingOfType("client.DecryptOptions")).
+			Return(io.NopCloser(strings.NewReader("the plain secret")), nil)
+		cryptoClient = mockClient
+
+		result, _, err := decryptTool(context.Background(), &mcp.CallToolRequest{}, DecryptArgs{
+			ComponentName: "crypto-vault",
+			CipherText:    "encrypted-data-base64",
+		})
+
+		assert.NoError(t, err)
+		assert.False(t, result.IsError)
+		textContent, ok := result.Content[0].(*mcp.TextContent)
+		assert.True(t, ok)
+		assert.Contains(t, textContent.Text, "the plain secret")
+	})
+}
+
 func TestRegisterTools(t *testing.T) {
 	mockClient := new(mocks.MockDaprClient)
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v1.0.0"}, nil)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	dtworkflow "github.com/dapr/durabletask-go/workflow"
 	dapr "github.com/dapr/go-sdk/client"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel"
@@ -28,6 +29,7 @@ import (
 	secret "github.com/dapr/dapr-mcp-server/pkg/secrets"
 	state "github.com/dapr/dapr-mcp-server/pkg/state"
 	"github.com/dapr/dapr-mcp-server/pkg/telemetry"
+	workflow "github.com/dapr/dapr-mcp-server/pkg/workflow"
 )
 
 var (
@@ -35,6 +37,7 @@ var (
 	Version = "dev"
 
 	httpAddr   = flag.String("http", "", "if set, use streamable HTTP at this address, instead of stdin/stdout")
+	stateless  = flag.Bool("stateless", false, "serve Streamable HTTP without a server-side session: clients survive a server restart (no 'session not found'), but server→client notifications are disabled. Also settable via DAPR_MCP_SERVER_STATELESS=true. Default (false) keeps the session so the server can push workflow updates/notifications to the client.")
 	DaprClient dapr.Client
 )
 
@@ -146,6 +149,37 @@ func main() {
 	invoke.RegisterTools(server, DaprClient)
 	actor.RegisterTools(server, DaprClient)
 
+	// Workflow management is part of the Dapr runtime (no component required);
+	// the default workflow client reuses the existing sidecar gRPC connection.
+	// Additional workflow apps can be configured via
+	// DAPR_MCP_SERVER_WORKFLOW_APPS=app-id=host:port,... — one client each.
+	workflowApps, err := workflow.ParseAppsConfig(os.Getenv("DAPR_MCP_SERVER_WORKFLOW_APPS"))
+	if err != nil {
+		logger.Error("Fatal error: invalid DAPR_MCP_SERVER_WORKFLOW_APPS", "error", err)
+		os.Exit(1)
+	}
+	workflowPool := make(map[string]workflow.WorkflowClient, len(workflowApps))
+	for appID, addr := range workflowApps {
+		appClient, appErr := dapr.NewClientWithAddressContext(ctx, addr)
+		if appErr != nil {
+			logger.Error("Fatal error: could not connect workflow app",
+				"app_id", appID,
+				"address", addr,
+				"error", appErr,
+			)
+			os.Exit(1)
+		}
+		workflowPool[appID] = dtworkflow.NewClient(appClient.GrpcClientConn())
+		logger.Info("Workflow app connected", "app_id", appID, "address", addr)
+	}
+
+	// Label the default client with the sidecar's own app-id in listings.
+	defaultAppID := ""
+	if meta, metaErr := DaprClient.GetMetadata(ctx); metaErr == nil && meta != nil {
+		defaultAppID = meta.ID
+	}
+	workflow.RegisterTools(server, dtworkflow.NewClient(DaprClient.GrpcClientConn()), defaultAppID, workflowPool)
+
 	// Discover components and register conditional tools
 	componentPresence := make(map[string]bool)
 	components, err := metadata.GetLiveComponentList(ctx, DaprClient)
@@ -233,10 +267,24 @@ func main() {
 		mux.HandleFunc("/readyz", healthChecker.ReadinessHandler)
 		mux.HandleFunc("/startupz", healthChecker.StartupHandler)
 
-		// Create MCP SSE handler
-		mcpHandler := mcp.NewSSEHandler(func(request *http.Request) *mcp.Server {
+		// Create MCP Streamable HTTP handler. Streamable HTTP gives every
+		// POST its own response instead of funneling all replies through a
+		// single long-lived SSE GET stream, which could wedge (TCP still
+		// established, logical session dead) and silently drop tool calls.
+		//
+		// Stateful (default): a server-side session is kept so the server can
+		// push notifications to the client (e.g. a workflow update, or a
+		// request for extra documents before the next step). Downside: a
+		// server restart invalidates the session and the client must reconnect.
+		//
+		// Stateless (--stateless / DAPR_MCP_SERVER_STATELESS=true): no session,
+		// so the client transparently survives a server restart (no 'session
+		// not found'), at the cost of server→client notifications.
+		statelessMode := *stateless || os.Getenv("DAPR_MCP_SERVER_STATELESS") == "true"
+		mcpHandler := mcp.NewStreamableHTTPHandler(func(request *http.Request) *mcp.Server {
 			return server
-		}, nil)
+		}, &mcp.StreamableHTTPOptions{Stateless: statelessMode})
+		logger.Info("MCP Streamable HTTP handler created", "stateless", statelessMode)
 
 		// Wrap with telemetry and auth middleware
 		wrappedMCPHandler := authMiddleware(telemetry.HTTPMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
