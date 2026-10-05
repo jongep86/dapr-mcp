@@ -1,0 +1,22 @@
+# Only go.mod, go.sum, cmd/ and pkg/ are needed to build the image.
+.git
+.github
+.smithy
+.gitignore
+.golangci.yml
+.dockerignore
+Dockerfile
+test/
+docs/
+components/
+*.md
+
+# Local build artifact
+/dapr-mcp-server
+
+# Coverage and test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+*.test
