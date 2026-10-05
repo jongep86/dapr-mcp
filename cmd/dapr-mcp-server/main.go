@@ -135,7 +135,9 @@ func main() {
 	opts := &mcp.ServerOptions{
 		Instructions:      instructions.String(),
 		CompletionHandler: complete,
-		HasTools:          true,
+		Capabilities: &mcp.ServerCapabilities{
+			Tools: &mcp.ToolCapabilities{ListChanged: true},
+		},
 	}
 	logger.Debug("Server instructions configured", "instructions", instructions.String())
 

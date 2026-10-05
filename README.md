@@ -282,8 +282,8 @@ Add to your Claude Desktop configuration:
 
 ### Prerequisites
 
-- Go 1.21+
-- Dapr CLI
+- Go 1.26+
+- Dapr CLI (tested against Dapr runtime 1.18)
 - Docker (optional, for local testing)
 
 ### Building
