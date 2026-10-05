@@ -63,11 +63,14 @@ func encryptTool(ctx context.Context, req *mcp.CallToolRequest, args EncryptArgs
 
 	cipherText := string(cipherBuf)
 
+	// Include the cipher text in the text content as well: many MCP clients
+	// only surface text content to the model, so payloads that live solely in
+	// the structured result never reach it.
 	successMessage := fmt.Sprintf(
-		"Successfully encrypted message using component '%s'. Cipher Text is returned in the tool result.",
-		args.ComponentName,
+		"Successfully encrypted message using component '%s'. Cipher text:\n%s",
+		args.ComponentName, cipherText,
 	)
-	log.Println(successMessage)
+	log.Printf("Successfully encrypted message using component '%s'.", args.ComponentName)
 	structuredResult := map[string]string{
 		"cipher_text": cipherText,
 	}
@@ -109,11 +112,14 @@ func decryptTool(ctx context.Context, req *mcp.CallToolRequest, args DecryptArgs
 
 	plainText := string(plainBuf)
 
+	// Include the plain text in the text content as well: many MCP clients
+	// only surface text content to the model, so payloads that live solely in
+	// the structured result never reach it.
 	successMessage := fmt.Sprintf(
-		"Successfully decrypted message using component '%s'. Plain text is returned in the tool result.",
-		args.ComponentName,
+		"Successfully decrypted message using component '%s'. Plain text:\n%s",
+		args.ComponentName, plainText,
 	)
-	log.Println(successMessage)
+	log.Printf("Successfully decrypted message using component '%s'.", args.ComponentName)
 	structuredResult := map[string]string{
 		"plain_text":     plainText,
 		"component_name": args.ComponentName,
