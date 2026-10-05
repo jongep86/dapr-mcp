@@ -34,7 +34,7 @@ The `dapr-mcp-server` binary in the repo root is a build artifact; never commit 
 
 ## Architecture
 
-**Entry point:** `cmd/dapr-mcp-server/main.go`. Supports two transports selected by the `--http` flag: streamable HTTP/SSE (`mcp.NewSSEHandler`) or stdio (default, for direct MCP client attachment). The HTTP path additionally wires health endpoints, auth middleware, telemetry middleware, and a stub `/dapr/subscribe` endpoint.
+**Entry point:** `cmd/dapr-mcp-server/main.go`. Supports two transports selected by the `--http` flag: Streamable HTTP (`mcp.NewStreamableHTTPHandler`; stateful by default, `--stateless` / `DAPR_MCP_SERVER_STATELESS=true` drops server-side sessions and with them server→client notifications) or stdio (default, for direct MCP client attachment). The HTTP path additionally wires health endpoints, auth middleware, telemetry middleware, and a stub `/dapr/subscribe` endpoint.
 
 **Tool packages (`pkg/<building-block>/tools.go`):** each Dapr building block is its own package (state, pubsub, secrets, invoke, lock, bindings, conversation, crypto, actors, metadata) following an identical pattern:
 
@@ -54,6 +54,6 @@ The `dapr-mcp-server` binary in the repo root is a build artifact; never commit 
 **Tests:**
 - Unit tests live next to code; `test/mocks/` provides testify-based mocks (`DaprClient` interface mirroring the go-sdk subset used, plus auth mocks).
 - `test/integration/` has `//go:build integration`-tagged tests (e.g., full Dapr Sentry auth flow against a mock JWKS server).
-- `test/app.py` + `test/components/` are a manual end-to-end harness: a Python `dapr_agents` DurableAgent that connects to the server over SSE.
+- `test/app.py` + `test/components/` are a manual end-to-end harness: a Python `dapr_agents` DurableAgent that connects to the server over Streamable HTTP.
 
 **Dapr components:** `components/` holds the Dapr component YAMLs (state store, pubsub, secrets, lock, crypto keys, etc.) used for local runs via `--resources-path components`.
