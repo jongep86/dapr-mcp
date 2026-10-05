@@ -19,7 +19,7 @@ from dapr_agents.llm import DaprChatClient
 
 async def _load_mcp_tools() -> list:
     client = MCPClient()
-    await client.connect_sse("local", url="http://localhost:8088")
+    await client.connect_streamable_http("local", url="http://localhost:8088")
     return client.get_all_tools()
 
 
@@ -29,7 +29,7 @@ def main() -> None:
     try:
         tools = asyncio.run(_load_mcp_tools())
     except Exception:
-        logging.exception("Failed to load MCP tools via SSE")
+        logging.exception("Failed to load MCP tools via Streamable HTTP")
         return
 
     asyncio.set_event_loop(asyncio.new_event_loop())

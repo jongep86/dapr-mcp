@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -93,9 +94,18 @@ func getMetadataTool(ctx context.Context, req *mcp.CallToolRequest, args any) (
 		Components: components,
 	}
 
+	// Also serialize the component list into the text content: many MCP
+	// clients only surface text content to the model, so details that live
+	// solely in the structured result never reach it (MCP spec: structured
+	// output SHOULD also be returned as serialized JSON in a text block).
+	detailsJSON, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		detailsJSON = []byte("(failed to serialize component details)")
+	}
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{
-			Text: fmt.Sprintf("Successfully retrieved %d Dapr component(s). The details are returned in the structured result.", len(components)),
+			Text: fmt.Sprintf("Successfully retrieved %d Dapr component(s):\n%s", len(components), detailsJSON),
 		}},
 	}, wrapper, nil
 }

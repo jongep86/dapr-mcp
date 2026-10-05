@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
+	dtworkflow "github.com/dapr/durabletask-go/workflow"
 	dapr "github.com/dapr/go-sdk/client"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel"
@@ -28,6 +30,7 @@ import (
 	secret "github.com/dapr/dapr-mcp-server/pkg/secrets"
 	state "github.com/dapr/dapr-mcp-server/pkg/state"
 	"github.com/dapr/dapr-mcp-server/pkg/telemetry"
+	workflow "github.com/dapr/dapr-mcp-server/pkg/workflow"
 )
 
 var (
@@ -35,32 +38,65 @@ var (
 	Version = "dev"
 
 	httpAddr   = flag.String("http", "", "if set, use streamable HTTP at this address, instead of stdin/stdout")
+	stateless  = flag.Bool("stateless", false, "serve streamable HTTP without server-side sessions (also DAPR_MCP_SERVER_STATELESS=true); clients survive server restarts, but server-to-client notifications are unavailable")
 	DaprClient dapr.Client
 )
 
-func initializeDaprClient(ctx context.Context, logger *slog.Logger) error {
+// connectWithRetry creates a Dapr client with connect, retrying up to 5 times
+// 2s apart. It is used for the primary client and for every workflow app.
+func connectWithRetry(logger *slog.Logger, connect func() (dapr.Client, error), logAttrs ...any) (dapr.Client, error) {
 	const maxRetries = 5
 	const retryDelay = 2 * time.Second
 
 	var err error
 
 	for i := 0; i < maxRetries; i++ {
-		DaprClient, err = dapr.NewClient()
+		var client dapr.Client
+		client, err = connect()
 		if err == nil {
-			logger.Info("Dapr client established successfully")
-			return nil
+			logger.Info("Dapr client established successfully", logAttrs...)
+			return client, nil
 		}
 		logger.Warn("Dapr client initialization failed",
-			"attempt", i+1,
-			"max_retries", maxRetries,
-			"error", err,
+			append([]any{"attempt", i + 1, "max_retries", maxRetries, "error", err}, logAttrs...)...,
 		)
 
 		if i < maxRetries-1 {
 			time.Sleep(retryDelay)
 		}
 	}
-	return fmt.Errorf("failed to create Dapr client after %d attempts: %w", maxRetries, err)
+	return nil, fmt.Errorf("failed to create Dapr client after %d attempts: %w", maxRetries, err)
+}
+
+func initializeDaprClient(logger *slog.Logger) error {
+	client, err := connectWithRetry(logger, func() (dapr.Client, error) { return dapr.NewClient() })
+	if err != nil {
+		return err
+	}
+	DaprClient = client
+	return nil
+}
+
+// initializeWorkflowApps connects to the sidecar of every workflow app
+// configured in DAPR_MCP_SERVER_WORKFLOW_APPS and returns one workflow client
+// per app-id. An unreachable app is an error: the mapping is explicit, so
+// skipping it would make list_workflows silently incomplete.
+func initializeWorkflowApps(ctx context.Context, logger *slog.Logger) (map[string]workflow.WorkflowClient, error) {
+	apps, err := workflow.ParseAppsConfig(os.Getenv(workflow.AppsEnvVar))
+	if err != nil {
+		return nil, err
+	}
+	pool := make(map[string]workflow.WorkflowClient, len(apps))
+	for appID, addr := range apps {
+		client, err := connectWithRetry(logger, func() (dapr.Client, error) {
+			return dapr.NewClientWithAddressContext(ctx, addr)
+		}, "workflow_app_id", appID, "address", addr)
+		if err != nil {
+			return nil, fmt.Errorf("workflow app '%s' at %s: %w", appID, addr, err)
+		}
+		pool[appID] = dtworkflow.NewClient(client.GrpcClientConn())
+	}
+	return pool, nil
 }
 
 func main() {
@@ -115,9 +151,22 @@ func main() {
 	otel.SetTextMapPropagator(prop)
 
 	// Initialize Dapr client
-	if initErr := initializeDaprClient(ctx, logger); initErr != nil {
+	if initErr := initializeDaprClient(logger); initErr != nil {
 		logger.Error("Fatal error: could not initialize Dapr client", "error", initErr)
 		os.Exit(1)
+	}
+
+	workflowPool, err := initializeWorkflowApps(ctx, logger)
+	if err != nil {
+		logger.Error("Fatal error: could not initialize workflow apps", "error", err)
+		os.Exit(1)
+	}
+
+	// The default workflow client targets the server's own sidecar; its
+	// app-id labels it in multi-app listings.
+	defaultAppID := "default"
+	if meta, metaErr := DaprClient.GetMetadata(ctx); metaErr == nil && meta != nil && meta.ID != "" {
+		defaultAppID = meta.ID
 	}
 
 	// Build server instructions
@@ -128,14 +177,28 @@ func main() {
 	instructions.WriteString("- **Clarity Before Acting**: If ANY required argument is missing (store name, key, topic, etc.), you **MUST run the get_components tool to enrich the information before proceeding**. If arguments are still missing first try the tool with sensible defaults, if this fails ask the user for clarification.\n")
 	instructions.WriteString("- **Serialization**: Metadata fields MUST be a dictionary/map (e.g., `{}`) and NEVER a quoted string (e.g., `\"{}\"`).\n")
 	instructions.WriteString("- **Multi-Step Workflow**: When multiple operations are requested, execute them sequentially — **one tool call at a time**.\n")
-	instructions.WriteString("- **Forbidden Actions**: NEVER invent component names, keys, topics, or cryptographic parameters.\n\n")
+	instructions.WriteString("- **Forbidden Actions**: NEVER invent component names, keys, topics, or cryptographic parameters.\n")
+	if len(workflowPool) > 0 {
+		appIDs := []string{defaultAppID}
+		for appID := range workflowPool {
+			if appID != defaultAppID {
+				appIDs = append(appIDs, appID)
+			}
+		}
+		sort.Strings(appIDs)
+		fmt.Fprintf(&instructions, "- **Workflow Apps**: Multiple workflow apps are configured (%s). Every workflow tool except `list_workflows` REQUIRES `appID`; run `list_workflows` without `appID` to see which app owns which instance.\n", strings.Join(appIDs, ", "))
+	}
+	instructions.WriteString("\n")
 	instructions.WriteString("### Tool Call Validity\n")
 	instructions.WriteString("Consult the tool's Description for specific component rules (e.g., key formatting, security warnings).\n")
 
 	opts := &mcp.ServerOptions{
 		Instructions:      instructions.String(),
 		CompletionHandler: complete,
-		HasTools:          true,
+		Capabilities: &mcp.ServerCapabilities{
+			Logging: &mcp.LoggingCapabilities{},
+			Tools:   &mcp.ToolCapabilities{ListChanged: true},
+		},
 	}
 	logger.Debug("Server instructions configured", "instructions", instructions.String())
 
@@ -145,6 +208,9 @@ func main() {
 	metadata.RegisterTools(server, DaprClient)
 	invoke.RegisterTools(server, DaprClient)
 	actor.RegisterTools(server, DaprClient)
+	// Workflows are part of the Dapr runtime, not a component; the default
+	// client reuses the sidecar's gRPC connection.
+	workflow.RegisterTools(server, dtworkflow.NewClient(DaprClient.GrpcClientConn()), defaultAppID, workflowPool)
 
 	// Discover components and register conditional tools
 	componentPresence := make(map[string]bool)
@@ -233,10 +299,13 @@ func main() {
 		mux.HandleFunc("/readyz", healthChecker.ReadinessHandler)
 		mux.HandleFunc("/startupz", healthChecker.StartupHandler)
 
-		// Create MCP SSE handler
-		mcpHandler := mcp.NewSSEHandler(func(request *http.Request) *mcp.Server {
+		// Create MCP streamable HTTP handler. Stateful by default so the
+		// server can push notifications over the session; stateless mode
+		// lets clients survive a server restart without "session not found".
+		statelessMode := *stateless || os.Getenv("DAPR_MCP_SERVER_STATELESS") == "true"
+		mcpHandler := mcp.NewStreamableHTTPHandler(func(request *http.Request) *mcp.Server {
 			return server
-		}, nil)
+		}, &mcp.StreamableHTTPOptions{Stateless: statelessMode})
 
 		// Wrap with telemetry and auth middleware
 		wrappedMCPHandler := authMiddleware(telemetry.HTTPMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +328,7 @@ func main() {
 		logger.Info("MCP HTTP server starting",
 			"address", *httpAddr,
 			"auth_enabled", authConfig.Enabled,
+			"stateless", statelessMode,
 		)
 		srv := &http.Server{
 			Addr:              *httpAddr,

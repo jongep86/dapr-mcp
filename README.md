@@ -13,6 +13,7 @@ dapr-mcp bridges AI agents with Dapr's powerful microservices APIs, enabling:
 - **Bindings**: Interact with external systems (databases, queues, etc.)
 - **Conversation AI**: Delegate tasks to external LLMs via Dapr
 - **Cryptography**: Encrypt and decrypt sensitive data
+- **Workflow Management**: Start, inspect, rerun, pause/resume, terminate, and purge Dapr Workflows, and raise events to them — across multiple workflow apps from one server
 
 ## Features
 
@@ -77,6 +78,16 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | state | get_bulk_state | Beta | Bulk state retrieval |
 | state | delete_state | Stable | State deletion |
 | state | execute_transaction | Stable | Atomic state operations |
+| workflow | start_workflow | Beta | Start a workflow instance, optionally at a scheduled time |
+| workflow | get_workflow_status | Beta | Workflow instance status/output |
+| workflow | get_workflow_history | Beta | Event history of an instance |
+| workflow | list_workflows | Beta | List instances with counts (per app in multi-app setups) |
+| workflow | rerun_workflow | Beta | Rerun an instance from a history event |
+| workflow | pause_workflow | Beta | Suspend a running instance |
+| workflow | resume_workflow | Beta | Resume a suspended instance |
+| workflow | terminate_workflow | Beta | Forcefully end an instance |
+| workflow | raise_workflow_event | Beta | Deliver an external event |
+| workflow | purge_workflow | Beta | Delete state of a finished instance |
 
 ## Configuration
 
@@ -87,6 +98,8 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DAPR_MCP_SERVER_LOG_LEVEL` | Log level: DEBUG, INFO, WARN, ERROR | `INFO` |
+| `DAPR_MCP_SERVER_STATELESS` | `true` serves Streamable HTTP without server-side sessions (same as `--stateless`) | `false` |
+| `DAPR_MCP_SERVER_WORKFLOW_APPS` | Additional workflow apps as comma-separated `app-id=host:port` sidecar gRPC endpoints | (none - own sidecar only) |
 
 #### OpenTelemetry Configuration
 
@@ -141,6 +154,45 @@ dapr run --app-id dapr-mcp-server --resources-path components -- dapr-mcp-server
 | `DAPR_SENTRY_AUDIENCE` | Expected audience claim | (none - not validated) |
 | `DAPR_SENTRY_TOKEN_HEADER` | Header containing the JWT | `Authorization` |
 | `DAPR_SENTRY_JWKS_REFRESH_INTERVAL` | JWKS cache refresh interval | `5m` |
+
+## HTTP Transport
+
+With `--http`, the server speaks MCP Streamable HTTP. By default it is
+**stateful**: each client gets a server-side session, which lets the server
+send notifications to the client. A server restart invalidates sessions, so
+clients must reconnect.
+
+With `--stateless` (or `DAPR_MCP_SERVER_STATELESS=true`) no session is kept:
+clients keep working across server restarts, but server-to-client
+notifications are not available.
+
+## Multi-App Workflow Management
+
+Dapr workflow instances are partitioned per app-id: a sidecar only sees the
+workflows of its own app. To manage the workflows of several applications
+from one MCP server, map their sidecar gRPC endpoints:
+
+```bash
+export DAPR_MCP_SERVER_WORKFLOW_APPS="company-onboarding=localhost:54783,estimating-gate1=localhost:60951"
+```
+
+- Each app is connected at startup (5 attempts, 2s apart); the server exits
+  if an app stays unreachable. Remove an app from the mapping if it is
+  intentionally down.
+- Every workflow tool takes an `appID` argument. When apps are configured,
+  `appID` is **required** on all tools except `list_workflows` (pass the
+  server's own app-id for its sidecar): routing a call to a sidecar that does
+  not own the instance can crash daprd
+  ([dapr/dapr#10217](https://github.com/dapr/dapr/issues/10217)).
+- `list_workflows` without `appID` lists all apps, reports `app_id` per
+  instance and `counts_by_app`, and reports an unreachable app as a warning
+  instead of failing. `limit` applies per app; continuation tokens are
+  returned per app and are passed back together with that `appID`.
+- `dapr run` assigns dynamic gRPC ports; use `--dapr-grpc-port` (or stable
+  Kubernetes/Catalyst endpoints) for a reliable mapping.
+
+See [docs/specs/2026-07-14-multi-app-workflows.md](docs/specs/2026-07-14-multi-app-workflows.md)
+for the design.
 
 ## Health Endpoints
 
@@ -282,7 +334,7 @@ Add to your Claude Desktop configuration:
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.26+
 - Dapr CLI
 - Docker (optional, for local testing)
 
@@ -323,6 +375,7 @@ pkg/
   secrets/            # Secret management tools
   state/              # State management tools
   telemetry/          # OTEL instrumentation
+  workflow/           # Workflow management tools
 ```
 
 ## Contributing
